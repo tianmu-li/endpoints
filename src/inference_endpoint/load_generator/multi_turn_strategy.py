@@ -167,7 +167,17 @@ class MultiTurnStrategy:
             self._inflight[query_id] = conv_id
 
             # Mark the turn as issued so wait_for_turn_ready can gate the next turn.
-            await self._conv_manager.mark_turn_issued(conv_id, turn)
+            # Pass current_turn_message when accumulating history at runtime so the
+            # user message appears in ConversationState.message_history for turn N+1.
+            current_turn_message: dict[str, Any] | None = None
+            if self._store_in_history:
+                pre_built = self._dataset_metadata.get(
+                    "pre_built_messages_by_key", {}
+                ).get((conv_id, turn), [])
+                current_turn_message = pre_built[-1] if pre_built else None
+            await self._conv_manager.mark_turn_issued(
+                conv_id, turn, message=current_turn_message
+            )
 
     def on_query_complete(self, query_id: str) -> None:
         """Called by BenchmarkSession when a QueryResult arrives.
@@ -198,7 +208,11 @@ class MultiTurnStrategy:
         response_text = result.get_response_output_string()
 
         if result.error is not None:
-            asyncio.ensure_future(self._conv_manager.mark_turn_failed(conv_id))
+            asyncio.ensure_future(
+                self._conv_manager.mark_turn_failed(
+                    conv_id, store_in_history=self._store_in_history
+                )
+            )
         else:
             asyncio.ensure_future(
                 self._conv_manager.mark_turn_complete(

@@ -297,5 +297,11 @@ def create_load_strategy(
                 )
             return ConcurrencyStrategy(lp.target_concurrency, sample_order)
 
+        case LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                "MULTI_TURN load pattern requires a MultiTurnDataset — "
+                "use 'inference-endpoint benchmark from-config' with a multi-turn dataset"
+            )
+
         case _:
             raise ValueError(f"Unsupported load pattern type: {lp.type}")

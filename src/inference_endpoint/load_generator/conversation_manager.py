@@ -107,13 +107,21 @@ class ConversationState:
                     f"{self.completed_client_turns}/{self.expected_client_turns} turns"
                 )
 
-    def mark_turn_failed(self):
+    def mark_turn_failed(self, store_in_history: bool = False):
         """Mark turn as failed (error/timeout) - still counts as completed for sequencing."""
         if self.pending_client_turn is not None:
             self.current_turn = self.pending_client_turn + 1
             self.pending_client_turn = None
             self.completed_client_turns += 1
             self.failed_client_turns += 1
+
+            if store_in_history:
+                self.message_history.append(
+                    {
+                        "role": "assistant",
+                        "content": "[ERROR: Turn failed or timed out]",
+                    }
+                )
 
             logger.warning(
                 f"Turn {self.current_turn - 1} failed for conversation {self.conversation_id}"
@@ -235,11 +243,12 @@ class ConversationManager:
             raise KeyError(f"Conversation {conversation_id} not initialized")
 
         async with state.condition:
+            if timeout is None:
+                await state.condition.wait_for(state.is_ready_for_turn)
+                return True
             try:
-                await asyncio.wait_for(
-                    self._wait_condition(state.condition, state.is_ready_for_turn),
-                    timeout=timeout,
-                )
+                async with asyncio.timeout(timeout):
+                    await state.condition.wait_for(state.is_ready_for_turn)
                 return True
             except TimeoutError:
                 return state.is_ready_for_turn()
@@ -265,23 +274,17 @@ class ConversationManager:
                 pre-created by the strategy before pipeline tasks are spawned).
         """
         state = self._conversations[conversation_id]
+        predicate = lambda: state.issued_client_turns >= min_issued  # noqa: E731
         async with state.condition:
+            if timeout is None:
+                await state.condition.wait_for(predicate)
+                return True
             try:
-                await asyncio.wait_for(
-                    self._wait_condition(
-                        state.condition,
-                        lambda: state.issued_client_turns >= min_issued,
-                    ),
-                    timeout=timeout,
-                )
+                async with asyncio.timeout(timeout):
+                    await state.condition.wait_for(predicate)
                 return True
             except TimeoutError:
                 return state.issued_client_turns >= min_issued
-
-    @staticmethod
-    async def _wait_condition(condition: asyncio.Condition, predicate: Any) -> None:
-        """Wait on condition until predicate is True. Must be called with condition held."""
-        await condition.wait_for(predicate)
 
     async def mark_turn_issued(
         self,
@@ -300,10 +303,9 @@ class ConversationManager:
         Raises:
             KeyError: If conversation_id not found in manager.
         """
-        async with self._lock:
-            state = self._conversations.get(conversation_id)
-            if state is None:
-                raise KeyError(f"Conversation {conversation_id} not initialized")
+        state = self._conversations.get(conversation_id)
+        if state is None:
+            raise KeyError(f"Conversation {conversation_id} not initialized")
         async with state.condition:
             state.add_client_turn(turn, message)
             state.condition.notify_all()
@@ -324,15 +326,16 @@ class ConversationManager:
         Raises:
             KeyError: If conversation_id not found in manager.
         """
-        async with self._lock:
-            state = self._conversations.get(conversation_id)
-            if state is None:
-                raise KeyError(f"Conversation {conversation_id} not initialized")
+        state = self._conversations.get(conversation_id)
+        if state is None:
+            raise KeyError(f"Conversation {conversation_id} not initialized")
         async with state.condition:
             state.add_assistant_turn(response if store_in_history else None)
             state.condition.notify_all()
 
-    async def mark_turn_failed(self, conversation_id: str):
+    async def mark_turn_failed(
+        self, conversation_id: str, store_in_history: bool = False
+    ):
         """Mark that assistant response failed (error/timeout).
 
         Failed turns still count toward conversation completion to ensure
@@ -340,14 +343,14 @@ class ConversationManager:
 
         Args:
             conversation_id: Conversation ID.
+            store_in_history: When True, append error placeholder to message_history.
 
         Raises:
             KeyError: If conversation_id not found in manager.
         """
-        async with self._lock:
-            state = self._conversations.get(conversation_id)
-            if state is None:
-                raise KeyError(f"Conversation {conversation_id} not initialized")
+        state = self._conversations.get(conversation_id)
+        if state is None:
+            raise KeyError(f"Conversation {conversation_id} not initialized")
         async with state.condition:
-            state.mark_turn_failed()
+            state.mark_turn_failed(store_in_history=store_in_history)
             state.condition.notify_all()
