@@ -696,3 +696,37 @@ async def test_live_turn_ordering_multi_conversation():
                 f"(t{turn_j + 1}={complete_times[q_cur]:.4f}, "
                 f"t{turn_j + 2}={complete_times[q_next]:.4f})"
             )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_large_concurrency():
+    """All turns complete correctly under a large concurrency limit (>=512).
+
+    Uses 200 conversations × 3 turns = 600 total requests with
+    target_concurrency=512. The semaphore allows up to 512 simultaneous
+    in-flight requests, so the first wave of 200 first-turns is issued
+    without throttling, and subsequent turns queue naturally. Verifies
+    that all 600 turns complete and return non-empty responses, confirming
+    the semaphore implementation handles large values without deadlock or
+    starvation.
+    """
+    model = _query_model_name(_LIVE_ENDPOINT)
+    n_conversations = 200
+    n_user_turns = 3
+    expected_turns = n_conversations * n_user_turns  # 600 total requests
+
+    issued, responses = await _run_live_session(
+        model=model,
+        n_conversations=n_conversations,
+        n_user_turns=n_user_turns,
+        target_concurrency=512,
+        timeout_s=300.0,
+    )
+
+    assert issued == expected_turns, f"Expected {expected_turns} issued, got {issued}"
+    assert (
+        len(responses) == expected_turns
+    ), f"Expected {expected_turns} responses, got {len(responses)}"
+    for qid, text in responses.items():
+        assert text.strip(), f"Query {qid} returned empty response"
