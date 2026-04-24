@@ -32,7 +32,7 @@ class FakePhaseIssuer:
         self.issued: list[int] = []
         self.issued_count = 0
 
-    def issue(self, sample_index: int) -> str | None:
+    def issue(self, sample_index: int, data_override: dict | None = None) -> str | None:
         if self._stop_after is not None and self._count >= self._stop_after:
             return None
         self._count += 1
@@ -96,8 +96,8 @@ async def test_single_conversation_multi_turn():
     issued_order: list[str] = []
     original_issue = issuer.issue
 
-    def tracked_issue(idx):
-        q = original_issue(idx)
+    def tracked_issue(idx, data_override=None):
+        q = original_issue(idx, data_override=data_override)
         if q:
             issued_order.append(q)
         return q
@@ -160,7 +160,7 @@ async def test_turn_ordering_enforced():
         issued_count = 0
         issued: list[int] = []
 
-        def issue(self, idx: int) -> str | None:
+        def issue(self, idx: int, data_override: dict | None = None) -> str | None:
             import time
 
             issue_timestamps[idx] = time.monotonic()

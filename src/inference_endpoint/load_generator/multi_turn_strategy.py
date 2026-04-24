@@ -156,7 +156,23 @@ class MultiTurnStrategy:
             if self._sem is not None:
                 await self._sem.acquire()
 
-            query_id = phase_issuer.issue(idx)
+            # For live-history mode: build messages from accumulated history + current turn,
+            # and pass as data_override so the pre-built messages from the dataset are replaced.
+            data_override: dict[str, Any] | None = None
+            current_turn_message: dict[str, Any] | None = None
+            if self._store_in_history:
+                pre_built = self._dataset_metadata.get(
+                    "pre_built_messages_by_key", {}
+                ).get((conv_id, turn), [])
+                current_turn_message = pre_built[-1] if pre_built else None
+                state = self._conv_manager.get_state(conv_id)
+                if state is not None and current_turn_message is not None:
+                    live_messages = state.message_history.copy() + [
+                        current_turn_message
+                    ]
+                    data_override = {"messages": live_messages}
+
+            query_id = phase_issuer.issue(idx, data_override=data_override)
             if query_id is None:
                 # Session stopping — release slot and exit
                 if self._sem is not None:
@@ -167,14 +183,6 @@ class MultiTurnStrategy:
             self._inflight[query_id] = conv_id
 
             # Mark the turn as issued so wait_for_turn_ready can gate the next turn.
-            # Pass current_turn_message when accumulating history at runtime so the
-            # user message appears in ConversationState.message_history for turn N+1.
-            current_turn_message: dict[str, Any] | None = None
-            if self._store_in_history:
-                pre_built = self._dataset_metadata.get(
-                    "pre_built_messages_by_key", {}
-                ).get((conv_id, turn), [])
-                current_turn_message = pre_built[-1] if pre_built else None
             await self._conv_manager.mark_turn_issued(
                 conv_id, turn, message=current_turn_message
             )

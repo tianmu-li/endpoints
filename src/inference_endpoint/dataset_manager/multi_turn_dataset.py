@@ -401,16 +401,19 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         # Set defaults for critical params if not present
         if "max_new_tokens" not in sample and "max_completion_tokens" not in sample:
-            sample["max_new_tokens"] = 128
+            sample["max_completion_tokens"] = 128
+        if "max_new_tokens" in sample and "max_completion_tokens" not in sample:
+            sample["max_completion_tokens"] = sample.pop("max_new_tokens")
         if "stream" not in sample:
             sample["stream"] = False
 
         # Attach pre-built message list (system + history + current turn).
+        # Key is "messages" so adapters can consume it directly (OpenAI chat format).
         key = (row["conversation_id"], int(row["turn"]))
         pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {}).get(
             key, []
         )
-        sample["pre_built_messages"] = pre_built
+        sample["messages"] = pre_built
 
         # Fields for use_dataset_history=False path (live history accumulation).
         sample["current_turn_message"] = pre_built[-1] if pre_built else {}

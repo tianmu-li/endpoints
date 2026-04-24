@@ -165,9 +165,9 @@ def test_multi_turn_dataset_load_sample(valid_multi_turn_jsonl):
     assert sample_0["turn"] == 1
     assert sample_0["role"] == "user"
     assert sample_0["content"] == "Hello, how are you?"
-    # System prompt is in pre_built_messages, not as a separate field
-    assert sample_0["pre_built_messages"][0]["role"] == "system"
-    assert sample_0["pre_built_messages"][0]["content"] == "You are a helpful assistant"
+    # System prompt is the first message in the messages array
+    assert sample_0["messages"][0]["role"] == "system"
+    assert sample_0["messages"][0]["content"] == "You are a helpful assistant"
 
     # Sample 1 should be second user turn (conv_001 turn 3)
     sample_1 = dataset.load_sample(1)
@@ -291,7 +291,7 @@ def test_multi_turn_dataset_multiple_conversations():
 
 @pytest.mark.unit
 def test_multi_turn_dataset_system_prompt_handling(valid_multi_turn_jsonl):
-    """Test system prompt is included as the first message in pre_built_messages.
+    """Test system prompt is included as the first message in the messages array.
 
     The system prompt is pre-baked into every client turn's message list so the
     conversation manager no longer needs to track it separately.
@@ -301,16 +301,16 @@ def test_multi_turn_dataset_system_prompt_handling(valid_multi_turn_jsonl):
     )
     dataset.load()
 
-    # First sample: pre_built_messages starts with system message
+    # First sample: messages starts with system message
     sample_0 = dataset.load_sample(0)
-    assert "pre_built_messages" in sample_0
-    msgs = sample_0["pre_built_messages"]
+    assert "messages" in sample_0
+    msgs = sample_0["messages"]
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"] == "You are a helpful assistant"
 
     # Second sample (same conversation, turn 3): system message still first
     sample_1 = dataset.load_sample(1)
-    msgs_1 = sample_1["pre_built_messages"]
+    msgs_1 = sample_1["messages"]
     assert msgs_1[0]["role"] == "system"
     assert msgs_1[0]["content"] == "You are a helpful assistant"
 
@@ -489,8 +489,8 @@ def test_multi_turn_dataset_additional_fields():
         # Just check they're accessible if present
         if "model" in sample:
             assert sample["model"] == "gpt-4"
-        if "max_new_tokens" in sample:
-            assert sample["max_new_tokens"] == 256
+        if "max_completion_tokens" in sample:
+            assert sample["max_completion_tokens"] == 256
         if "temperature" in sample:
             assert sample["temperature"] == pytest.approx(0.7)
 
@@ -888,7 +888,7 @@ def test_load_sample_merged_tool_row_has_no_content_key():
     s1 = ds.load_sample(1)
     assert s1["role"] == "tool"
     assert "content" not in s1  # must NOT emit NaN
-    assert "pre_built_messages" in s1
+    assert "messages" in s1
 
 
 @pytest.mark.unit
@@ -961,27 +961,27 @@ def test_build_metadata_pre_built_messages_no_tools():
 
 
 @pytest.mark.unit
-def test_load_sample_includes_pre_built_messages():
-    """load_sample returns pre_built_messages with the complete message list."""
+def test_load_sample_includes_messages():
+    """load_sample returns messages with the complete message list."""
     df = _make_tool_sequence_df()
     ds = MultiTurnDataset(df)
     ds.load()
 
     s0 = ds.load_sample(0)  # user turn 1
-    assert "pre_built_messages" in s0
-    msgs = s0["pre_built_messages"]
+    assert "messages" in s0
+    msgs = s0["messages"]
     assert msgs[0]["role"] == "system"
     assert msgs[-1] == {"role": "user", "content": "What is the weather?"}
 
     s1 = ds.load_sample(1)  # tool turn 3
     assert s1["role"] == "tool"
-    msgs_t3 = s1["pre_built_messages"]
+    msgs_t3 = s1["messages"]
     # system + user(1) + asst_tc(2) + tool(3) = 4 messages
     assert len(msgs_t3) == 4
     assert msgs_t3[-1]["role"] == "tool"
 
     s2 = ds.load_sample(2)  # user turn 5
-    msgs_t5 = s2["pre_built_messages"]
+    msgs_t5 = s2["messages"]
     # system + user(1) + asst_tc(2) + tool(3) + asst(4) + user(5) = 6 messages
     assert len(msgs_t5) == 6
 
@@ -1003,8 +1003,8 @@ def test_client_turns_include_tool_rows():
 
 
 @pytest.mark.unit
-def test_pre_built_messages_include_prior_assistant_response(valid_multi_turn_jsonl):
-    """The terminal assistant response before each user turn is included in pre_built_messages."""
+def test_messages_include_prior_assistant_response(valid_multi_turn_jsonl):
+    """The terminal assistant response before each user turn is included in messages."""
     dataset = MultiTurnDataset.load_from_file(
         valid_multi_turn_jsonl, format=DatasetFormat.JSONL
     )
@@ -1012,26 +1012,26 @@ def test_pre_built_messages_include_prior_assistant_response(valid_multi_turn_js
 
     # Sample 0: turn 1 (first user) → just [system, user(1)]
     s0 = dataset.load_sample(0)
-    msgs_0 = s0["pre_built_messages"]
+    msgs_0 = s0["messages"]
     assert msgs_0[0]["role"] == "system"
     assert msgs_0[-1]["role"] == "user"
 
     # Sample 1: turn 3 (second user) → [system, user(1), assistant(2), user(3)]
     s1 = dataset.load_sample(1)
-    msgs_1 = s1["pre_built_messages"]
+    msgs_1 = s1["messages"]
     assert len(msgs_1) == 4
     assert msgs_1[2] == {"role": "assistant", "content": "I'm doing well, thank you!"}
     assert msgs_1[3]["role"] == "user"
 
     # Sample 2: turn 1 of conv_002 → no prior assistant row
     s2 = dataset.load_sample(2)
-    msgs_2 = s2["pre_built_messages"]
+    msgs_2 = s2["messages"]
     assert all(m["role"] != "assistant" for m in msgs_2)
 
 
 @pytest.mark.unit
-def test_pre_built_messages_no_cross_conversation_bleed():
-    """Messages for conv_001 must not appear in conv_002's pre_built_messages."""
+def test_messages_no_cross_conversation_bleed():
+    """Messages for conv_001 must not appear in conv_002's messages array."""
     data = [
         {"conversation_id": "c1", "turn": 1, "role": "user", "content": "c1 user"},
         {"conversation_id": "c2", "turn": 1, "role": "user", "content": "c2 user"},
@@ -1049,25 +1049,25 @@ def test_pre_built_messages_no_cross_conversation_bleed():
 
         # c1: only its own user message
         s_c1 = dataset.load_sample(0)
-        assert s_c1["pre_built_messages"] == [{"role": "user", "content": "c1 user"}]
+        assert s_c1["messages"] == [{"role": "user", "content": "c1 user"}]
 
         # c2: only c2 messages (no c1 content)
         s_c2 = dataset.load_sample(1)
-        contents = [m.get("content") for m in s_c2["pre_built_messages"]]
+        contents = [m.get("content") for m in s_c2["messages"]]
         assert "c1 user" not in contents
     finally:
         Path(temp_path).unlink()
 
 
 @pytest.mark.unit
-def test_pre_built_messages_with_tool_sequence_terminal_assistant():
-    """Terminal assistant response (turn 4) appears in pre_built_messages for user(5)."""
+def test_messages_with_tool_sequence_terminal_assistant():
+    """Terminal assistant response (turn 4) appears in messages for user(5)."""
     df = _make_tool_sequence_df()
     ds = MultiTurnDataset(df)
     ds.load()
 
     s2 = ds.load_sample(2)  # user turn 5
-    msgs = s2["pre_built_messages"]
+    msgs = s2["messages"]
     # The terminal assistant at turn 4 should be included
     assistant_msgs = [m for m in msgs if m["role"] == "assistant" and m.get("content")]
     assert any(m["content"] == "The weather is 22°C." for m in assistant_msgs)
