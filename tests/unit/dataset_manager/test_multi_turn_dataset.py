@@ -128,8 +128,8 @@ def test_multi_turn_dataset_load_valid_data(valid_multi_turn_jsonl):
     )
     dataset.load()
 
-    # Should have 5 rows total (3 for conv_001, 2 for conv_002)
-    assert len(dataset.data) == 5
+    # data contains only client turns (3 user turns), not all rows
+    assert len(dataset.data) == 3
 
     # Should have 3 user turns (samples) - only user turns are indexed
     assert dataset.num_samples() == 3
@@ -137,18 +137,18 @@ def test_multi_turn_dataset_load_valid_data(valid_multi_turn_jsonl):
 
 @pytest.mark.unit
 def test_multi_turn_dataset_user_turn_indexing(valid_multi_turn_jsonl):
-    """Test that only client turns (user + tool) are indexed as samples."""
+    """Test that only client turns (user + tool) are stored as samples."""
     dataset = MultiTurnDataset.load_from_file(
         valid_multi_turn_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
-    # Verify client turn indices are correct (fixture has only user turns)
-    assert len(dataset._client_turn_indices) == 3
+    # data contains only client turns (fixture has only user turns)
+    assert dataset.num_samples() == 3
 
-    # Check that indices point to client turns
-    for idx in dataset._client_turn_indices:
-        assert dataset.data[idx]["role"] in ("user", "tool")
+    # Every sample in data is a client turn
+    for i in range(dataset.num_samples()):
+        assert dataset.load_sample(i)["role"] in ("user", "tool")
 
 
 @pytest.mark.unit
@@ -268,8 +268,8 @@ def test_multi_turn_dataset_multiple_conversations():
         dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
         dataset.load()
 
-        # 9 total rows, 5 user turns (c1:t1, c1:t3, c2:t1, c2:t3, c3:t1)
-        assert len(dataset.data) == 9
+        # data contains only client turns: 5 user turns (c1:t1, c1:t3, c2:t1, c2:t3, c3:t1)
+        assert len(dataset.data) == 5
         assert dataset.num_samples() == 5
 
         # Metadata checks
@@ -383,8 +383,8 @@ def test_multi_turn_dataset_conversation_grouping():
         dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
         dataset.load()
 
-        # 5 total rows, 3 user turns (c1t1, c1t3, c2t1)
-        assert len(dataset.data) == 5
+        # data contains only client turns: 3 user turns (c1t1, c1t3, c2t1)
+        assert len(dataset.data) == 3
         assert dataset.num_samples() == 3
 
         # Load samples to verify conversation grouping
@@ -485,14 +485,9 @@ def test_multi_turn_dataset_additional_fields():
         dataset.load()
 
         sample = dataset.load_sample(0)
-        # Fields may or may not be present depending on how dataframe handles them
-        # Just check they're accessible if present
-        if "model" in sample:
-            assert sample["model"] == "gpt-4"
-        if "max_completion_tokens" in sample:
-            assert sample["max_completion_tokens"] == 256
-        if "temperature" in sample:
-            assert sample["temperature"] == pytest.approx(0.7)
+        assert sample["model"] == "gpt-4"
+        assert sample["max_completion_tokens"] == 256
+        assert sample["temperature"] == pytest.approx(0.7)
 
     finally:
         Path(temp_path).unlink()
@@ -540,34 +535,33 @@ def test_multi_turn_dataset_openai_field_forwarding():
 
 @pytest.mark.unit
 def test_multi_turn_dataset_all_generation_params():
-    """Test that all generation parameters in GENERATION_PARAMS are forwarded."""
-    from inference_endpoint.dataset_manager.multi_turn_dataset import GENERATION_PARAMS
-
-    # Create dataset with all possible generation params
+    """Test that dataset-supplied generation parameters are forwarded to the sample."""
+    # Create dataset with a representative set of generation params
+    row_params = {
+        "model": "test-model",
+        "max_completion_tokens": 100,
+        "stream": True,
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "top_k": 50,
+        "seed": 42,
+        "repetition_penalty": 1.1,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3,
+        "stop": ["END"],
+        "n": 2,
+        "logit_bias": {"100": 10},
+        "name": "TestEntity",
+        "user": "test_user_001",
+        "chat_template": "test_template",
+    }
     data = [
         {
             "conversation_id": "c1",
             "turn": 1,
             "role": "user",
             "content": "Test",
-            # Include all params from GENERATION_PARAMS
-            "model": "test-model",
-            "max_new_tokens": 100,
-            "max_completion_tokens": 100,
-            "stream": True,
-            "temperature": 0.8,
-            "top_p": 0.95,
-            "top_k": 50,
-            "seed": 42,
-            "repetition_penalty": 1.1,
-            "frequency_penalty": 0.5,
-            "presence_penalty": 0.3,
-            "stop": ["END"],
-            "n": 2,
-            "logit_bias": {"100": 10},
-            "name": "TestEntity",
-            "user": "test_user_001",
-            "chat_template": "test_template",
+            **row_params,
         },
         {
             "conversation_id": "c1",
@@ -588,13 +582,9 @@ def test_multi_turn_dataset_all_generation_params():
 
         sample = dataset.load_sample(0)
 
-        # Verify all GENERATION_PARAMS fields are forwarded
-        # (excluding conversational fields like conversation_id, turn, role, content, system)
-        for param in GENERATION_PARAMS:
-            if param in data[0]:
-                assert (
-                    param in sample
-                ), f"Generation parameter '{param}' not forwarded to sample"
+        # All non-NaN row fields must appear in the pre-baked sample
+        for param in row_params:
+            assert param in sample, f"Parameter '{param}' not forwarded to sample"
     finally:
         Path(temp_path).unlink()
 
