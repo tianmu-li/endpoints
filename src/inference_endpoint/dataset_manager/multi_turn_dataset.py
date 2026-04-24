@@ -339,6 +339,26 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         )
         client_turn_samples: list[dict[str, Any]] = []
 
+        # Collect per-conversation defaults from the first user row so that
+        # fields like model/max_completion_tokens propagate to tool rows.
+        _PROPAGATED_KEYS = {
+            "model",
+            "max_completion_tokens",
+            "max_new_tokens",
+            "stream",
+        }
+        conv_defaults: dict[str, dict[str, Any]] = {}
+        for row in all_rows:
+            cid = row.get("conversation_id")
+            if cid not in conv_defaults and row.get("role") == "user":
+                conv_defaults[cid] = {
+                    k: row[k]
+                    for k in _PROPAGATED_KEYS
+                    if k in row
+                    and row[k] is not None
+                    and not (isinstance(row[k], float) and pd.isna(row[k]))
+                }
+
         for row in all_rows:
             if row.get("role") not in ("user", "tool"):
                 continue
@@ -350,6 +370,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 for k, v in row.items()
                 if v is not None and not (isinstance(v, float) and pd.isna(v))
             }
+
+            # Fill missing propagated fields from the first user row of this conversation.
+            for k, v in conv_defaults.get(row.get("conversation_id"), {}).items():
+                if k not in sample:
+                    sample[k] = v
 
             # max_new_tokens → max_completion_tokens alias
             if "max_completion_tokens" not in sample and "max_new_tokens" in sample:

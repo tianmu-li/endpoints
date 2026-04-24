@@ -733,48 +733,150 @@ async def test_live_large_concurrency():
 
 
 # ---------------------------------------------------------------------------
-# Flat tool-use dataset tests (agentic_coding_flat.jsonl)
+# Synthetic tool-use dataset tests
 # ---------------------------------------------------------------------------
 
-_FLAT_DATASET_PATH = "/model/agentic_coding_flat.jsonl"
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a bash command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}
 
 
-def _load_flat_tool_conversations(
-    path: str, model: str, n_conversations: int = 3
-) -> MultiTurnDataset:
-    """Load the shortest N tool-use conversations from a flat JSONL dataset."""
-    convs: dict[str, list[dict]] = {}
-    with open(path) as f:
-        for line in f:
-            row = json.loads(line)
-            convs.setdefault(row["conversation_id"], []).append(row)
+def _make_synthetic_tool_rows(model: str, n_conversations: int = 3) -> list[dict]:
+    """Build synthetic flat tool-use conversations.
 
-    tool_convs = [
-        (cid, rows)
-        for cid, rows in convs.items()
-        if any(r["role"] == "tool" for r in rows)
-    ]
-    tool_convs.sort(key=lambda x: len(x[1]))
-    selected = tool_convs[:n_conversations]
+    Each conversation follows the pattern:
+      user(1) → assistant+tool_calls(2) → tool_results(3) → assistant(4) → user(5)
 
-    all_rows: list[dict] = []
-    for _, rows in selected:
-        for r in rows:
-            r["model"] = model
-            r["max_completion_tokens"] = 32
-        all_rows.extend(rows)
+    The second conversation includes parallel tool_calls (2 calls, 2 results)
+    to exercise the parallel expansion path. All conversations carry the
+    ``tools`` field on user and tool rows, mirroring real agentic datasets.
+    """
+    rows: list[dict] = []
+    for i in range(n_conversations):
+        cid = f"synth_conv_{i:03d}"
+        parallel = i == 1
 
-    ds = MultiTurnDataset(dataframe=pd.DataFrame(all_rows))
-    ds.load()
-    return ds
+        rows.append(
+            {
+                "conversation_id": cid,
+                "turn": 1,
+                "role": "user",
+                "content": f"Run a command to check item {i}",
+                "system": "You are a coding assistant with bash access.",
+                "model": model,
+                "max_completion_tokens": 32,
+                "tools": [_BASH_TOOL],
+            }
+        )
+
+        if parallel:
+            rows.append(
+                {
+                    "conversation_id": cid,
+                    "turn": 2,
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{cid}_0",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command": "echo hello"}',
+                            },
+                        },
+                        {
+                            "id": f"call_{cid}_1",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command": "echo world"}',
+                            },
+                        },
+                    ],
+                }
+            )
+            rows.append(
+                {
+                    "conversation_id": cid,
+                    "turn": 3,
+                    "role": "tool",
+                    "tool_results": [
+                        {"tool_call_id": f"call_{cid}_0", "content": "hello"},
+                        {"tool_call_id": f"call_{cid}_1", "content": "world"},
+                    ],
+                    "tools": [_BASH_TOOL],
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "conversation_id": cid,
+                    "turn": 2,
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{cid}_0",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": f'{{"command": "echo item_{i}"}}',
+                            },
+                        }
+                    ],
+                }
+            )
+            rows.append(
+                {
+                    "conversation_id": cid,
+                    "turn": 3,
+                    "role": "tool",
+                    "tool_results": [
+                        {"tool_call_id": f"call_{cid}_0", "content": f"item_{i}"}
+                    ],
+                    "tools": [_BASH_TOOL],
+                }
+            )
+
+        rows.append(
+            {
+                "conversation_id": cid,
+                "turn": 4,
+                "role": "assistant",
+                "content": f"The command returned the expected output for item {i}.",
+            }
+        )
+        rows.append(
+            {
+                "conversation_id": cid,
+                "turn": 5,
+                "role": "user",
+                "content": "Thanks, that looks correct.",
+                "model": model,
+                "max_completion_tokens": 32,
+                "tools": [_BASH_TOOL],
+            }
+        )
+
+    return rows
 
 
-async def _run_flat_live_session(
+async def _run_tool_use_session(
     ds: MultiTurnDataset,
     target_concurrency: int | None = 8,
     timeout_s: float = 300.0,
 ) -> tuple[int, dict[str, str], dict[str, str]]:
-    """Run a flat dataset multi-turn session against the live endpoint.
+    """Run a tool-use multi-turn session against the live endpoint.
 
     Returns (issued_count, responses, errors).
     """
@@ -834,17 +936,19 @@ async def _run_flat_live_session(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_live_flat_tool_dataset_message_construction():
-    """Pre-built messages from real flat tool-use dataset are valid OpenAI format.
+async def test_live_tool_use_message_construction():
+    """Pre-built messages from synthetic tool-use dataset are valid OpenAI format.
 
-    Loads the 3 shortest tool-use conversations from agentic_coding_flat.jsonl
+    Builds 3 synthetic conversations (including one with parallel tool_calls)
     and validates that all pre-built messages have correct structure:
     - tool messages have tool_call_id and content
     - assistant messages with tool_calls include content key (even as null)
     - all messages have a role
     """
     model = _query_model_name(_LIVE_ENDPOINT)
-    ds = _load_flat_tool_conversations(_FLAT_DATASET_PATH, model, n_conversations=3)
+    rows = _make_synthetic_tool_rows(model, n_conversations=3)
+    ds = MultiTurnDataset(dataframe=pd.DataFrame(rows))
+    ds.load()
 
     for i in range(ds.num_samples()):
         sample = ds.load_sample(i)
@@ -873,18 +977,21 @@ async def test_live_flat_tool_dataset_message_construction():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_live_flat_tool_dataset_end_to_end():
-    """Run 3 real tool-use conversations from flat dataset against the live endpoint.
+async def test_live_tool_use_end_to_end():
+    """Run synthetic tool-use conversations against the live endpoint.
 
-    Validates that all client turns (user + tool) are issued and receive responses,
-    confirming the full pipeline: JSONL load -> MultiTurnDataset -> pre-built messages
-    -> OpenAI adapter -> HTTP to endpoint -> response.
+    Validates that all client turns (user + tool) are issued and receive
+    responses, confirming the full pipeline: synthetic rows -> MultiTurnDataset
+    -> pre-built messages -> OpenAI adapter -> HTTP to endpoint -> response.
+    Includes parallel tool_calls to exercise multi-message expansion.
     """
     model = _query_model_name(_LIVE_ENDPOINT)
-    ds = _load_flat_tool_conversations(_FLAT_DATASET_PATH, model, n_conversations=3)
+    rows = _make_synthetic_tool_rows(model, n_conversations=3)
+    ds = MultiTurnDataset(dataframe=pd.DataFrame(rows))
+    ds.load()
     expected = ds.num_samples()
 
-    issued, responses, errors = await _run_flat_live_session(ds, target_concurrency=8)
+    issued, responses, errors = await _run_tool_use_session(ds, target_concurrency=8)
 
     assert issued == expected, f"Expected {expected} issued, got {issued}"
     assert (
