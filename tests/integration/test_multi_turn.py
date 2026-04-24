@@ -448,58 +448,63 @@ def _query_model_name(endpoint: str) -> str:
         return ""
 
 
-def _make_live_rows(model: str, n_conversations: int = 3) -> list[dict]:
-    """Build a simple multi-conversation dataset rows list.
+def _make_live_rows(
+    model: str, n_conversations: int = 20, n_user_turns: int = 3
+) -> list[dict]:
+    """Build a multi-conversation dataset rows list.
 
-    Each conversation has one user turn followed by one scripted assistant turn.
-    The assistant placeholder is in the dataset only to satisfy the turn-structure
-    validator; it is never sent to the endpoint.
+    Each conversation has n_user_turns user turns interleaved with scripted
+    assistant placeholders (needed to satisfy the turn-structure validator but
+    never sent to the endpoint). The resulting dataset produces
+    n_conversations × n_user_turns client-turn samples.
     """
     rows = []
+    _user_prompts = [
+        "Reply with exactly one word: the number {n} in English.",
+        "Add one to the previous number. Reply with only that word.",
+        "Add one more. Reply with only that word.",
+    ]
     for i in range(n_conversations):
         conv_id = f"live_conv_{i:03d}"
-        rows.append(
-            {
-                "conversation_id": conv_id,
-                "turn": 1,
-                "role": "user",
-                "content": f"Reply with exactly one word: the number {i + 1} in English.",
-                "model": model,
-                "max_completion_tokens": 10,
-            }
-        )
-        rows.append(
-            {
-                "conversation_id": conv_id,
-                "turn": 2,
-                "role": "assistant",
-                "content": "placeholder",
-            }
-        )
-        rows.append(
-            {
-                "conversation_id": conv_id,
-                "turn": 3,
-                "role": "user",
-                "content": "Say 'ok'.",
-                "model": model,
-                "max_completion_tokens": 10,
-            }
-        )
+        turn = 1
+        for j in range(n_user_turns):
+            prompt = _user_prompts[j % len(_user_prompts)].format(n=i + 1)
+            rows.append(
+                {
+                    "conversation_id": conv_id,
+                    "turn": turn,
+                    "role": "user",
+                    "content": prompt,
+                    "model": model,
+                    "max_completion_tokens": 10,
+                }
+            )
+            turn += 1
+            if j < n_user_turns - 1:
+                rows.append(
+                    {
+                        "conversation_id": conv_id,
+                        "turn": turn,
+                        "role": "assistant",
+                        "content": "placeholder",
+                    }
+                )
+                turn += 1
     return rows
 
 
 async def _run_live_session(
     model: str,
     n_conversations: int,
+    n_user_turns: int,
     target_concurrency: int | None,
-    timeout_s: float = 120.0,
+    timeout_s: float = 300.0,
 ) -> tuple[int, dict[str, str]]:
     """Run a live multi-turn session against the endpoint at _LIVE_ENDPOINT.
 
     Returns (issued_count, {query_id: response_text}).
     """
-    rows = _make_live_rows(model, n_conversations)
+    rows = _make_live_rows(model, n_conversations, n_user_turns)
     ds = MultiTurnDataset(dataframe=pd.DataFrame(rows))
     ds.load()
 
@@ -524,7 +529,7 @@ async def _run_live_session(
     http_config = HTTPClientConfig(
         endpoint_urls=[f"{_LIVE_ENDPOINT}/v1/chat/completions"],
         warmup_connections=0,
-        num_workers=2,
+        num_workers=4,
     )
     http_client = await HTTPEndpointClient.create(http_config, loop)
     issuer = HttpClientSampleIssuer(http_client)
@@ -566,26 +571,28 @@ async def _run_live_session(
     "target_concurrency",
     [
         pytest.param(1, id="concurrency_1"),
-        pytest.param(2, id="concurrency_2"),
+        pytest.param(4, id="concurrency_4"),
         pytest.param(None, id="concurrency_unlimited"),
     ],
 )
 async def test_live_concurrency(target_concurrency):
-    """All turns of 3 concurrent conversations complete for each concurrency level.
+    """All turns of 20 concurrent conversations complete for each concurrency level.
 
-    Uses the live model endpoint at port 8868. Each conversation has 2 user
-    turns (6 total). Verifies that every turn receives a non-empty response
-    regardless of the concurrency throttle applied by target_concurrency.
+    Uses the live model endpoint at port 8868. Each conversation has 3 user
+    turns (60 total requests). Verifies that every turn receives a non-empty
+    response regardless of the concurrency throttle applied by target_concurrency.
     """
     model = _query_model_name(_LIVE_ENDPOINT)
-    n_conversations = 3
-    expected_turns = n_conversations * 2  # 2 user turns per conversation
+    n_conversations = 20
+    n_user_turns = 3
+    expected_turns = n_conversations * n_user_turns  # 60 total requests
 
     issued, responses = await _run_live_session(
         model=model,
         n_conversations=n_conversations,
+        n_user_turns=n_user_turns,
         target_concurrency=target_concurrency,
-        timeout_s=120.0,
+        timeout_s=300.0,
     )
 
     assert issued == expected_turns, f"Expected {expected_turns} issued, got {issued}"
@@ -601,13 +608,14 @@ async def test_live_concurrency(target_concurrency):
 async def test_live_turn_ordering_multi_conversation():
     """Turn N+1 of each conversation is always issued after turn N completes.
 
-    Runs 4 conversations with 2 turns each concurrently. Records per-query
-    issue and completion timestamps and asserts that within every conversation
-    the second turn's issue time is strictly after the first turn's completion.
+    Runs 10 conversations with 3 turns each concurrently (30 total requests).
+    Records per-query completion timestamps and asserts that within every
+    conversation each successive turn completes no earlier than the previous.
     """
     model = _query_model_name(_LIVE_ENDPOINT)
-    n_conversations = 4
-    rows = _make_live_rows(model, n_conversations)
+    n_conversations = 10
+    n_user_turns = 3
+    rows = _make_live_rows(model, n_conversations, n_user_turns)
 
     ds = MultiTurnDataset(dataframe=pd.DataFrame(rows))
     ds.load()
@@ -635,7 +643,7 @@ async def test_live_turn_ordering_multi_conversation():
     http_config = HTTPClientConfig(
         endpoint_urls=[f"{_LIVE_ENDPOINT}/v1/chat/completions"],
         warmup_connections=0,
-        num_workers=2,
+        num_workers=4,
     )
     http_client = await HTTPEndpointClient.create(http_config, loop)
     issuer = HttpClientSampleIssuer(http_client)
@@ -656,7 +664,7 @@ async def test_live_turn_ordering_multi_conversation():
             metrics.Throughput(1000),
             [metrics.Throughput(1000)],
             min_duration_ms=0,
-            max_duration_ms=120_000,
+            max_duration_ms=300_000,
             n_samples_from_dataset=ds.num_samples(),
             n_samples_to_issue=ds.num_samples(),
             min_sample_count=1,
@@ -665,23 +673,26 @@ async def test_live_turn_ordering_multi_conversation():
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         )
         phase = PhaseConfig("perf", rt, ds, PhaseType.PERFORMANCE, strategy=strategy)
-        result = await asyncio.wait_for(session.run([phase]), timeout=120.0)
+        result = await asyncio.wait_for(session.run([phase]), timeout=300.0)
     finally:
         await http_client.shutdown_async()
 
-    assert result.perf_results[0].issued_count == n_conversations * 2
+    expected_total = n_conversations * n_user_turns
+    assert result.perf_results[0].issued_count == expected_total
 
     # Build index → query_id map and verify per-conversation ordering.
+    # Samples are grouped by conversation, turns sorted ascending within each:
+    #   conv_0_t1, conv_0_t2, conv_0_t3, conv_1_t1, ...
     uuid_to_index = result.perf_results[0].uuid_to_index
     index_to_query = {v: k for k, v in uuid_to_index.items()}
 
-    # Samples are ordered by conversation then turn: conv_0_t1, conv_0_t3, conv_1_t1, ...
     for conv_i in range(n_conversations):
-        t1_idx = conv_i * 2
-        t3_idx = conv_i * 2 + 1
-        q_t1 = index_to_query[t1_idx]
-        q_t3 = index_to_query[t3_idx]
-        assert complete_times[q_t1] <= complete_times[q_t3], (
-            f"conv {conv_i}: turn 3 completed before turn 1 "
-            f"(t1={complete_times[q_t1]:.4f}, t3={complete_times[q_t3]:.4f})"
-        )
+        base = conv_i * n_user_turns
+        for turn_j in range(n_user_turns - 1):
+            q_cur = index_to_query[base + turn_j]
+            q_next = index_to_query[base + turn_j + 1]
+            assert complete_times[q_cur] <= complete_times[q_next], (
+                f"conv {conv_i}: turn {turn_j + 2} completed before turn {turn_j + 1} "
+                f"(t{turn_j + 1}={complete_times[q_cur]:.4f}, "
+                f"t{turn_j + 2}={complete_times[q_next]:.4f})"
+            )
