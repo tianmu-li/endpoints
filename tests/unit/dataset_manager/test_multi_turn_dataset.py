@@ -1295,3 +1295,132 @@ def test_current_turn_messages_by_key_parallel_tools():
     assert len(ctm[("c1", 3)]) == 2
     assert ctm[("c1", 3)][0]["tool_call_id"] == "c_0"
     assert ctm[("c1", 3)][1]["tool_call_id"] == "c_1"
+
+
+# ============================================================================
+# Fix 1: system_prompts_by_conv in metadata (live-history mode)
+# ============================================================================
+
+
+@pytest.mark.unit
+def test_metadata_contains_system_prompts_by_conv():
+    """_build_metadata exposes system_prompts_by_conv keyed by conversation_id."""
+    data = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Hi",
+            "system": "Be concise",
+        },
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Ok"},
+        # c2 has no system prompt
+        {"conversation_id": "c2", "turn": 1, "role": "user", "content": "Hello"},
+    ]
+    df = pd.DataFrame(data)
+    ds = MultiTurnDataset(df)
+
+    spc = ds.conversation_metadata["system_prompts_by_conv"]
+    assert spc["c1"] == "Be concise"
+    assert spc["c2"] is None
+
+
+@pytest.mark.unit
+def test_metadata_system_prompts_multiple_convs():
+    """Each conversation gets its own system prompt entry."""
+    data = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "A",
+            "system": "Sys1",
+        },
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "B"},
+        {
+            "conversation_id": "c2",
+            "turn": 1,
+            "role": "user",
+            "content": "C",
+            "system": "Sys2",
+        },
+        {"conversation_id": "c2", "turn": 2, "role": "assistant", "content": "D"},
+    ]
+    df = pd.DataFrame(data)
+    ds = MultiTurnDataset(df)
+
+    spc = ds.conversation_metadata["system_prompts_by_conv"]
+    assert spc["c1"] == "Sys1"
+    assert spc["c2"] == "Sys2"
+
+
+# ============================================================================
+# Fix 2: tool_results / tool_calls stripped from sample dicts
+# ============================================================================
+
+
+@pytest.mark.unit
+def test_tool_results_not_in_sample_dict():
+    """tool_results must not appear in the pre-baked sample dict for tool turns."""
+    df = _make_tool_sequence_df()
+    ds = MultiTurnDataset(df)
+    ds.load()
+
+    # Sample 1 is the tool turn (turn 3)
+    s1 = ds.load_sample(1)
+    assert s1["role"] == "tool"
+    assert "tool_results" not in s1
+
+
+@pytest.mark.unit
+def test_tool_calls_not_in_sample_dict():
+    """tool_calls must not appear in sample dicts (only relevant on assistant rows)."""
+    data = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Go",
+            "tool_calls": [
+                {"id": "bad", "type": "function", "function": {"name": "f"}}
+            ],
+        },
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Done"},
+    ]
+    df = pd.DataFrame(data)
+    ds = MultiTurnDataset(df)
+    ds.load()
+
+    s0 = ds.load_sample(0)
+    assert "tool_calls" not in s0
+
+
+# ============================================================================
+# Fix 3: no dead current_turn_message / system_content fields in sample dicts
+# ============================================================================
+
+
+@pytest.mark.unit
+def test_no_dead_current_turn_message_field():
+    """current_turn_message must not appear in pre-baked sample dicts."""
+    df = _make_tool_sequence_df()
+    ds = MultiTurnDataset(df)
+    ds.load()
+
+    for i in range(ds.num_samples()):
+        s = ds.load_sample(i)
+        assert (
+            "current_turn_message" not in s
+        ), f"Sample {i} has dead field current_turn_message"
+
+
+@pytest.mark.unit
+def test_no_dead_system_content_field():
+    """system_content must not appear in pre-baked sample dicts."""
+    df = _make_tool_sequence_df()
+    ds = MultiTurnDataset(df)
+    ds.load()
+
+    for i in range(ds.num_samples()):
+        s = ds.load_sample(i)
+        assert "system_content" not in s, f"Sample {i} has dead field system_content"

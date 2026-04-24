@@ -109,9 +109,18 @@ class MultiTurnStrategy:
             conv_samples[conv_id].append((sample_index, sample_meta["turn"]))
 
         # Pre-create all conversation states before spawning tasks.
+        sys_prompts = self._dataset_metadata.get("system_prompts_by_conv", {})
         for conv_id, turns in conv_samples.items():
+            sys_content = sys_prompts.get(conv_id) if self._store_in_history else None
+            system_message = (
+                {"role": "system", "content": sys_content}
+                if sys_content is not None
+                else None
+            )
             await self._conv_manager.get_or_create(
-                conv_id, expected_client_turns=len(turns)
+                conv_id,
+                expected_client_turns=len(turns),
+                system_message=system_message,
             )
 
         tasks = [
