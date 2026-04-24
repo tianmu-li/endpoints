@@ -159,17 +159,14 @@ class MultiTurnStrategy:
             # For live-history mode: build messages from accumulated history + current turn,
             # and pass as data_override so the pre-built messages from the dataset are replaced.
             data_override: dict[str, Any] | None = None
-            current_turn_message: dict[str, Any] | None = None
+            current_turn_messages: list[dict[str, Any]] | None = None
             if self._store_in_history:
-                pre_built = self._dataset_metadata.get(
-                    "pre_built_messages_by_key", {}
-                ).get((conv_id, turn), [])
-                current_turn_message = pre_built[-1] if pre_built else None
+                current_turn_messages = self._dataset_metadata.get(
+                    "current_turn_messages_by_key", {}
+                ).get((conv_id, turn))
                 state = self._conv_manager.get_state(conv_id)
-                if state is not None and current_turn_message is not None:
-                    live_messages = state.message_history.copy() + [
-                        current_turn_message
-                    ]
+                if state is not None and current_turn_messages:
+                    live_messages = state.message_history.copy() + current_turn_messages
                     data_override = {"messages": live_messages}
 
             query_id = phase_issuer.issue(idx, data_override=data_override)
@@ -184,7 +181,7 @@ class MultiTurnStrategy:
 
             # Mark the turn as issued so wait_for_turn_ready can gate the next turn.
             await self._conv_manager.mark_turn_issued(
-                conv_id, turn, message=current_turn_message
+                conv_id, turn, messages=current_turn_messages
             )
 
     def on_query_complete(self, query_id: str) -> None:

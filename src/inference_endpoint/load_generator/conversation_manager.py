@@ -56,17 +56,25 @@ class ConversationState:
     message_history: list[dict[str, Any]] = field(default_factory=list)
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
-    def add_client_turn(self, turn: int, message: dict[str, Any] | None = None):
+    def add_client_turn(
+        self,
+        turn: int,
+        message: dict[str, Any] | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ):
         """Record that a client turn has been issued (updates sequencing counters).
 
         Args:
             turn: Turn number for this client message.
-            message: Message dict to append to message_history (only used when
-                use_dataset_history=False).
+            message: Single message dict to append (legacy, for backwards compat).
+            messages: List of message dicts to extend history with (preferred;
+                handles parallel tool_results that expand to multiple messages).
         """
         self.pending_client_turn = turn
         self.issued_client_turns += 1
-        if message is not None:
+        if messages is not None:
+            self.message_history.extend(messages)
+        elif message is not None:
             self.message_history.append(message)
 
     def add_assistant_turn(self, content: str | None = None):
@@ -291,14 +299,16 @@ class ConversationManager:
         conversation_id: str,
         turn: int,
         message: dict[str, Any] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ):
         """Mark that a client turn has been issued (updates sequencing counters).
 
         Args:
             conversation_id: Conversation ID.
             turn: Turn number being issued.
-            message: Message dict to append to history (used when
-                use_dataset_history=False).
+            message: Single message dict to append (legacy).
+            messages: List of message dicts to extend history with (preferred;
+                handles parallel tool_results that expand to multiple messages).
 
         Raises:
             KeyError: If conversation_id not found in manager.
@@ -307,7 +317,7 @@ class ConversationManager:
         if state is None:
             raise KeyError(f"Conversation {conversation_id} not initialized")
         async with state.condition:
-            state.add_client_turn(turn, message)
+            state.add_client_turn(turn, message=message, messages=messages)
             state.condition.notify_all()
 
     async def mark_turn_complete(

@@ -730,3 +730,163 @@ async def test_live_large_concurrency():
     ), f"Expected {expected_turns} responses, got {len(responses)}"
     for qid, text in responses.items():
         assert text.strip(), f"Query {qid} returned empty response"
+
+
+# ---------------------------------------------------------------------------
+# Flat tool-use dataset tests (agentic_coding_flat.jsonl)
+# ---------------------------------------------------------------------------
+
+_FLAT_DATASET_PATH = "/model/agentic_coding_flat.jsonl"
+
+
+def _load_flat_tool_conversations(
+    path: str, model: str, n_conversations: int = 3
+) -> MultiTurnDataset:
+    """Load the shortest N tool-use conversations from a flat JSONL dataset."""
+    convs: dict[str, list[dict]] = {}
+    with open(path) as f:
+        for line in f:
+            row = json.loads(line)
+            convs.setdefault(row["conversation_id"], []).append(row)
+
+    tool_convs = [
+        (cid, rows)
+        for cid, rows in convs.items()
+        if any(r["role"] == "tool" for r in rows)
+    ]
+    tool_convs.sort(key=lambda x: len(x[1]))
+    selected = tool_convs[:n_conversations]
+
+    all_rows: list[dict] = []
+    for _, rows in selected:
+        for r in rows:
+            r["model"] = model
+            r["max_completion_tokens"] = 32
+        all_rows.extend(rows)
+
+    ds = MultiTurnDataset(dataframe=pd.DataFrame(all_rows))
+    ds.load()
+    return ds
+
+
+async def _run_flat_live_session(
+    ds: MultiTurnDataset,
+    target_concurrency: int | None = 8,
+    timeout_s: float = 300.0,
+) -> tuple[int, dict[str, str], dict[str, str]]:
+    """Run a flat dataset multi-turn session against the live endpoint.
+
+    Returns (issued_count, responses, errors).
+    """
+    mt_cfg = MultiTurnConfig(turn_timeout_s=120.0, use_dataset_history=True)
+    conv_manager = ConversationManager()
+    strategy = MultiTurnStrategy(
+        conversation_manager=conv_manager,
+        dataset_metadata=ds.conversation_metadata,
+        multi_turn_config=mt_cfg,
+        target_concurrency=target_concurrency,
+    )
+
+    loop = asyncio.get_running_loop()
+    responses: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    def on_complete(result: QueryResult) -> None:
+        strategy.on_sample_complete(result)
+        if result.error:
+            errors[result.id] = str(result.error)
+        else:
+            responses[result.id] = result.get_response_output_string()
+
+    http_config = HTTPClientConfig(
+        endpoint_urls=[f"{_LIVE_ENDPOINT}/v1/chat/completions"],
+        warmup_connections=0,
+        num_workers=4,
+    )
+    http_client = await HTTPEndpointClient.create(http_config, loop)
+    issuer = HttpClientSampleIssuer(http_client)
+
+    try:
+        session = BenchmarkSession(
+            issuer=issuer,
+            event_publisher=_NoOpPublisher(),
+            loop=loop,
+            on_sample_complete=on_complete,
+        )
+        rt = RuntimeSettings(
+            metrics.Throughput(1000),
+            [metrics.Throughput(1000)],
+            min_duration_ms=0,
+            max_duration_ms=int(timeout_s * 1000),
+            n_samples_from_dataset=ds.num_samples(),
+            n_samples_to_issue=ds.num_samples(),
+            min_sample_count=1,
+            rng_sched=random.Random(42),
+            rng_sample_index=random.Random(42),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        phase = PhaseConfig("perf", rt, ds, PhaseType.PERFORMANCE, strategy=strategy)
+        result = await asyncio.wait_for(session.run([phase]), timeout=timeout_s)
+        return result.perf_results[0].issued_count, responses, errors
+    finally:
+        await http_client.shutdown_async()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_flat_tool_dataset_message_construction():
+    """Pre-built messages from real flat tool-use dataset are valid OpenAI format.
+
+    Loads the 3 shortest tool-use conversations from agentic_coding_flat.jsonl
+    and validates that all pre-built messages have correct structure:
+    - tool messages have tool_call_id and content
+    - assistant messages with tool_calls include content key (even as null)
+    - all messages have a role
+    """
+    model = _query_model_name(_LIVE_ENDPOINT)
+    ds = _load_flat_tool_conversations(_FLAT_DATASET_PATH, model, n_conversations=3)
+
+    for i in range(ds.num_samples()):
+        sample = ds.load_sample(i)
+        cid = sample["conversation_id"]
+        turn = sample["turn"]
+        msgs = sample["messages"]
+
+        assert msgs, f"Sample {i} ({cid}, t={turn}): empty messages"
+
+        for j, m in enumerate(msgs):
+            assert "role" in m, f"Sample {i} ({cid}, t={turn}): msg[{j}] missing 'role'"
+
+            if m.get("role") == "tool":
+                assert (
+                    "tool_call_id" in m
+                ), f"Sample {i} ({cid}, t={turn}): msg[{j}] tool missing 'tool_call_id'"
+                assert (
+                    "content" in m
+                ), f"Sample {i} ({cid}, t={turn}): msg[{j}] tool missing 'content'"
+
+            if m.get("role") == "assistant" and "tool_calls" in m:
+                assert (
+                    "content" in m
+                ), f"Sample {i} ({cid}, t={turn}): msg[{j}] assistant+tool_calls missing 'content'"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_flat_tool_dataset_end_to_end():
+    """Run 3 real tool-use conversations from flat dataset against the live endpoint.
+
+    Validates that all client turns (user + tool) are issued and receive responses,
+    confirming the full pipeline: JSONL load -> MultiTurnDataset -> pre-built messages
+    -> OpenAI adapter -> HTTP to endpoint -> response.
+    """
+    model = _query_model_name(_LIVE_ENDPOINT)
+    ds = _load_flat_tool_conversations(_FLAT_DATASET_PATH, model, n_conversations=3)
+    expected = ds.num_samples()
+
+    issued, responses, errors = await _run_flat_live_session(ds, target_concurrency=8)
+
+    assert issued == expected, f"Expected {expected} issued, got {issued}"
+    assert (
+        len(responses) + len(errors) == expected
+    ), f"Expected {expected} completions, got {len(responses)} ok + {len(errors)} errors"

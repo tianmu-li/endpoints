@@ -195,6 +195,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         # This includes assistant rows (tool dispatches or terminal responses)
         # so no runtime injection is required.
         pre_built_messages_by_key: dict[tuple, list[dict]] = {}
+        current_turn_messages_by_key: dict[tuple, list[dict]] = {}
 
         for conv_id, group in self.dataframe.groupby("conversation_id"):
             sorted_group = group.sort_values("turn")
@@ -220,12 +221,18 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 prior_rows = sorted_group[sorted_group["turn"] < t_n]
                 for _, prior_row in prior_rows.iterrows():
                     msg: dict[str, Any] = {}
-                    for key in ("role", "content", "tool_calls"):
+                    for key in ("role", "content", "tool_calls", "tool_results"):
                         val = prior_row.get(key)
                         if val is not None and not (
                             isinstance(val, float) and pd.isna(val)
                         ):
                             msg[key] = val
+                    if (
+                        msg.get("role") == "assistant"
+                        and "tool_calls" in msg
+                        and "content" not in msg
+                    ):
+                        msg["content"] = None
                     if msg.get("role"):
                         # Expand merged parallel tool results: a single row with
                         # tool_results: [{tool_call_id, content}, ...] expands into
@@ -239,9 +246,10 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 # Append the current client turn message.
                 # A merged parallel-tool row carries tool_results instead of a
                 # single tool_call_id/content pair; expand to one message per result.
+                current_turn_msgs: list[dict] = []
                 expanded = _expand_tool_results(row)
                 if expanded:
-                    messages.extend(expanded)
+                    current_turn_msgs = expanded
                 else:
                     cur: dict[str, Any] = {}
                     for key in ("role", "content"):
@@ -250,9 +258,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                             isinstance(val, float) and pd.isna(val)
                         ):
                             cur[key] = val
-                    messages.append(cur)
+                    current_turn_msgs = [cur]
+                messages.extend(current_turn_msgs)
 
                 pre_built_messages_by_key[(conv_id, t_n)] = messages
+                current_turn_messages_by_key[(conv_id, t_n)] = current_turn_msgs
 
                 samples.append(
                     {
@@ -270,6 +280,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             .max(),
             "client_turns_per_conversation": client_turns_per_conv,
             "pre_built_messages_by_key": pre_built_messages_by_key,
+            "current_turn_messages_by_key": current_turn_messages_by_key,
         }
 
     def load(
@@ -323,6 +334,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         # NaN filtering replaces the GENERATION_PARAMS allowlist — any key whose
         # value is float NaN was absent in the original dataset row.
         pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {})
+        cur_turn_msgs = self.conversation_metadata.get(
+            "current_turn_messages_by_key", {}
+        )
         client_turn_samples: list[dict[str, Any]] = []
 
         for row in all_rows:
@@ -351,7 +365,10 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             sample["messages"] = messages
 
             # Fields for use_dataset_history=False path (live history accumulation).
-            sample["current_turn_message"] = messages[-1] if messages else {}
+            ct_msgs = cur_turn_msgs.get(key, [])
+            sample["current_turn_message"] = (
+                ct_msgs[-1] if ct_msgs else (messages[-1] if messages else {})
+            )
             first = messages[0] if messages else {}
             sample["system_content"] = (
                 first.get("content") if first.get("role") == "system" else None

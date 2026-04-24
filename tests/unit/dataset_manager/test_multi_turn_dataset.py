@@ -1061,3 +1061,237 @@ def test_messages_with_tool_sequence_terminal_assistant():
     # The terminal assistant at turn 4 should be included
     assistant_msgs = [m for m in msgs if m["role"] == "assistant" and m.get("content")]
     assert any(m["content"] == "The weather is 22°C." for m in assistant_msgs)
+
+
+# ============================================================================
+# Tool-use flat dataset regression tests (BUG 1, BUG 2, BUG 3)
+# ============================================================================
+
+
+@pytest.mark.unit
+def test_prior_tool_row_expanded_with_tool_call_id():
+    """Prior tool rows must expand to messages with tool_call_id and content (BUG 1)."""
+    df = _make_tool_sequence_df()
+    ds = MultiTurnDataset(df)
+    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+
+    # Client turn 3 (user, t=5) has a prior tool row at t=3.
+    # msgs_t5[3] should be the expanded tool message with proper fields.
+    msgs_t5 = pbm[("c1", 5)]
+    tool_msgs = [m for m in msgs_t5 if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_c1_0"
+    assert tool_msgs[0]["content"] == '{"temp": 22}'
+
+
+@pytest.mark.unit
+def test_prior_parallel_tool_results_expand_to_multiple_messages():
+    """Prior turn with 2 parallel tool_results expands to 2 tool messages."""
+    df = pd.DataFrame(
+        [
+            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"},
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c_0",
+                        "type": "function",
+                        "function": {"name": "f1", "arguments": "{}"},
+                    },
+                    {
+                        "id": "c_1",
+                        "type": "function",
+                        "function": {"name": "f2", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 3,
+                "role": "tool",
+                "tool_results": [
+                    {"tool_call_id": "c_0", "content": "r1"},
+                    {"tool_call_id": "c_1", "content": "r2"},
+                ],
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 4,
+                "role": "assistant",
+                "content": "Done",
+            },
+            {"conversation_id": "c1", "turn": 5, "role": "user", "content": "Ok"},
+        ]
+    )
+    ds = MultiTurnDataset(df)
+    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+
+    # user(5) sees prior rows: user(1), assistant(2), tool(3)x2, assistant(4)
+    msgs_t5 = pbm[("c1", 5)]
+    tool_msgs = [m for m in msgs_t5 if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0]["tool_call_id"] == "c_0"
+    assert tool_msgs[0]["content"] == "r1"
+    assert tool_msgs[1]["tool_call_id"] == "c_1"
+    assert tool_msgs[1]["content"] == "r2"
+
+
+@pytest.mark.unit
+def test_assistant_content_null_preserved_in_history():
+    """Assistant messages with tool_calls and content:null include content key (BUG 2)."""
+    df = _make_tool_sequence_df()
+    ds = MultiTurnDataset(df)
+    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+
+    # Client turn 2 (tool, t=3): prior includes assistant(2) with tool_calls + content: null
+    msgs_t3 = pbm[("c1", 3)]
+    asst_msg = msgs_t3[2]
+    assert asst_msg["role"] == "assistant"
+    assert "tool_calls" in asst_msg
+    assert "content" in asst_msg
+    assert asst_msg["content"] is None
+
+    # Also verify in user(5)'s history
+    msgs_t5 = pbm[("c1", 5)]
+    asst_tc_msg = msgs_t5[2]
+    assert asst_tc_msg["role"] == "assistant"
+    assert "tool_calls" in asst_tc_msg
+    assert "content" in asst_tc_msg
+    assert asst_tc_msg["content"] is None
+
+
+@pytest.mark.unit
+def test_jsonl_round_trip_with_tools_field():
+    """Load from JSONL tmpfile with tools field; verify tools survives to sample dict."""
+    data = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Run the test",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "description": "Run a bash command",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "tc_0",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"cmd": "ls"}'},
+                }
+            ],
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 3,
+            "role": "tool",
+            "tool_results": [{"tool_call_id": "tc_0", "content": "file1.py"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "description": "Run a bash command",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 4,
+            "role": "assistant",
+            "content": "The directory contains file1.py",
+        },
+    ]
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
+        temp_path = f.name
+
+    try:
+        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset.load()
+
+        # user(1) has tools
+        s0 = dataset.load_sample(0)
+        assert "tools" in s0
+        assert len(s0["tools"]) == 1
+        assert s0["tools"][0]["function"]["name"] == "bash"
+
+        # tool(3) also has tools
+        s1 = dataset.load_sample(1)
+        assert "tools" in s1
+        assert s1["tools"][0]["function"]["name"] == "bash"
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.unit
+def test_current_turn_messages_by_key_parallel_tools():
+    """current_turn_messages_by_key stores all expanded messages for a tool turn."""
+    df = pd.DataFrame(
+        [
+            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Go"},
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c_0",
+                        "type": "function",
+                        "function": {"name": "f1", "arguments": "{}"},
+                    },
+                    {
+                        "id": "c_1",
+                        "type": "function",
+                        "function": {"name": "f2", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 3,
+                "role": "tool",
+                "tool_results": [
+                    {"tool_call_id": "c_0", "content": "r1"},
+                    {"tool_call_id": "c_1", "content": "r2"},
+                ],
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 4,
+                "role": "assistant",
+                "content": "Done",
+            },
+        ]
+    )
+    ds = MultiTurnDataset(df)
+    ctm = ds.conversation_metadata["current_turn_messages_by_key"]
+
+    # user(1) current turn is 1 message
+    assert len(ctm[("c1", 1)]) == 1
+    assert ctm[("c1", 1)][0] == {"role": "user", "content": "Go"}
+
+    # tool(3) current turn has 2 expanded messages (parallel tool_results)
+    assert len(ctm[("c1", 3)]) == 2
+    assert ctm[("c1", 3)][0]["tool_call_id"] == "c_0"
+    assert ctm[("c1", 3)][1]["tool_call_id"] == "c_1"
