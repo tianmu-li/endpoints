@@ -423,3 +423,212 @@ async def test_turn_ordering_enforced_end_to_end(echo_server):
 
     # Turn 3 must complete after turn 1 completes
     assert complete_times[q_turn3] >= complete_times[q_turn1]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_tool_use_conversation_all_turns_issued(echo_server):
+    """Tool-use conversation: all client turns (user + tool) are issued and completed."""
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search", "arguments": '{"q": "test"}'},
+        }
+    ]
+    tool_results = [{"tool_call_id": "call_1", "content": "search result"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            },
+        }
+    ]
+
+    rows = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Find something",
+            "tools": tools,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 3,
+            "role": "tool",
+            "tool_results": tool_results,
+            "tools": tools,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 4,
+            "role": "assistant",
+            "content": "Here is the result",
+        },
+        {"conversation_id": "c1", "turn": 5, "role": "user", "content": "Thanks"},
+    ]
+    ds = _make_dataset(rows)
+    strategy = _make_strategy(ds)
+    responses: dict = {}
+
+    count = await _run_session(echo_server.url, ds, strategy, responses)
+
+    # Client turns: turn 1 (user) + turn 3 (tool) + turn 5 (user) = 3
+    assert count == 3
+    assert len(responses) == 3
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_conversation_ending_with_tool_row(echo_server):
+    """Conversation ending with a tool row completes normally (matches agentic_coding dataset pattern)."""
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "write_file", "arguments": '{"path": "out.py"}'},
+        }
+    ]
+    tool_results = [{"tool_call_id": "call_1", "content": "file written"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+
+    rows = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Write a file",
+            "tools": tools,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 3,
+            "role": "tool",
+            "tool_results": tool_results,
+            "tools": tools,
+        },
+    ]
+    ds = _make_dataset(rows)
+    strategy = _make_strategy(ds)
+    responses: dict = {}
+
+    count = await _run_session(echo_server.url, ds, strategy, responses)
+
+    # Client turns: turn 1 (user) + turn 3 (tool) = 2
+    assert count == 2
+    assert len(responses) == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_tools_field_forwarded_to_endpoint(echo_server):
+    """The 'tools' array from the dataset reaches the endpoint in every request payload."""
+    received_payloads: list[dict] = []
+
+    class CapturingEchoServer(EchoServer):
+        async def _handle_echo_chat_completions_request(self, request):
+            try:
+                payload = await request.json()
+                received_payloads.append(payload)
+            except Exception:
+                pass
+            return await super()._handle_echo_chat_completions_request(request)
+
+    server = CapturingEchoServer(port=0)
+    server.start()
+    try:
+        tool_calls = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"q": "hello"}'},
+            }
+        ]
+        tool_results = [{"tool_call_id": "call_1", "content": "result"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                        "required": ["q"],
+                    },
+                },
+            }
+        ]
+
+        rows = [
+            {
+                "conversation_id": "c1",
+                "turn": 1,
+                "role": "user",
+                "content": "Search for hello",
+                "tools": tools,
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": None,
+                "tool_calls": tool_calls,
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 3,
+                "role": "tool",
+                "tool_results": tool_results,
+                "tools": tools,
+            },
+        ]
+        ds = _make_dataset(rows)
+        strategy = _make_strategy(ds, use_dataset_history=True)
+        responses: dict = {}
+
+        count = await _run_session(server.url, ds, strategy, responses)
+        assert count == 2
+
+        assert len(received_payloads) == 2
+        for payload in received_payloads:
+            assert "tools" in payload
+            assert len(payload["tools"]) == 1
+            assert payload["tools"][0]["function"]["name"] == "search"
+    finally:
+        server.stop()
