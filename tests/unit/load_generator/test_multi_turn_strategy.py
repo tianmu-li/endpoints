@@ -75,7 +75,7 @@ async def test_single_conversation_single_turn():
         # Mark turn 1 complete
         state = conv_manager.get_state("conv1")
         if state:
-            await conv_manager.mark_turn_complete("conv1", "response 1")
+            conv_manager.mark_turn_complete("conv1", "response 1")
 
     asyncio.create_task(complete_turns())
     count = await strategy.execute(issuer)
@@ -231,24 +231,20 @@ async def test_on_query_complete_releases_semaphore():
 async def test_on_sample_complete_routes_to_manager():
     """on_sample_complete marks the turn complete in the ConversationManager."""
     conv_manager = ConversationManager()
-    await conv_manager.get_or_create("conv1", expected_client_turns=1)
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
     metadata = _make_dataset_metadata({"conv1": [1]})
     strategy = MultiTurnStrategy(conv_manager, metadata)
 
     # Simulate issuer registering conv_id in _inflight
     strategy._inflight["q0001"] = "conv1"
-    # Pre-issue a turn so the state has pending_client_turn
-    await conv_manager.mark_turn_issued("conv1", 1)
 
     result = QueryResult(id="q0001", response_output=TextModelOutput(output="hello"))
     strategy.on_sample_complete(result)
 
-    # Allow the ensure_future coroutine to run
-    await asyncio.sleep(0.01)
-
     state = conv_manager.get_state("conv1")
     assert state is not None
-    assert state.completed_client_turns == 1
+    assert state.completed_turns == 1
+    assert state.turn_done.is_set()
     assert state.is_complete()
 
 
@@ -259,12 +255,11 @@ async def test_error_response_marks_turn_failed():
     from inference_endpoint.core.types import ErrorData
 
     conv_manager = ConversationManager()
-    await conv_manager.get_or_create("conv1", expected_client_turns=1)
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
     metadata = _make_dataset_metadata({"conv1": [1]})
     strategy = MultiTurnStrategy(conv_manager, metadata)
 
     strategy._inflight["q0001"] = "conv1"
-    await conv_manager.mark_turn_issued("conv1", 1)
 
     result = QueryResult(
         id="q0001",
@@ -272,11 +267,10 @@ async def test_error_response_marks_turn_failed():
         error=ErrorData(error_type="timeout", error_message="timed out"),
     )
     strategy.on_sample_complete(result)
-    await asyncio.sleep(0.01)
 
     state = conv_manager.get_state("conv1")
     assert state is not None
-    assert state.failed_client_turns == 1
+    assert state.failed_turns == 1
 
 
 def _make_metadata_with_system(
