@@ -307,5 +307,4 @@ Planned features:
 - [ ] Poisson conversation arrival mode implementation
 - [ ] Per-conversation metrics in reporting
 - [ ] Conversation-level latency percentiles
-- [ ] Support for tool/function calls in conversations
 - [ ] Dynamic conversation branching
