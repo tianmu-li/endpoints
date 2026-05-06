@@ -318,6 +318,7 @@ class Dataset:
         format: DatasetFormat | None = None,
         dataset_id: str | None = None,
         num_repeats: int = 1,
+        **dataset_kwargs,
     ) -> "Dataset":
         assert format is None or isinstance(
             format, DatasetFormat
@@ -335,6 +336,7 @@ class Dataset:
             loader.get_dataframe(),
             transforms=transforms,
             repeats=num_repeats,
+            **dataset_kwargs,
         )
 
     def load(
