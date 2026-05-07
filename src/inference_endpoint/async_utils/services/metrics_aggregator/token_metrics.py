@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +26,39 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 from transformers import AutoTokenizer
+
+# Minimal user message used to satisfy chat templates that reject assistant-only
+# message lists. Its token count is subtracted so only the assistant payload is
+# measured.
+_PREFIX_USER_MSG: dict[str, str] = {"role": "user", "content": ""}
+
+
+def _normalize_tool_calls_for_template(
+    tool_calls: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ensure ``function.arguments`` is a dict, not the OpenAI-wire JSON string.
+
+    Hermes-style chat templates iterate ``arguments`` as a mapping; a string
+    payload raises and forces the fallback path, inflating token counts.
+    """
+    normalized: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                parsed = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                normalized.append(tc)
+                continue
+            if isinstance(parsed, dict):
+                new_tc = dict(tc)
+                new_tc["function"] = {**fn, "arguments": parsed}
+                normalized.append(new_tc)
+                continue
+        normalized.append(tc)
+    return normalized
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -83,14 +117,30 @@ class TokenizePool:
             self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
                 self._tokenizer_name
             )
+            # Baseline = tokens contributed by a [user, empty-assistant] pair minus
+            # the [user] prefix alone. Some templates (Qwen3-Coder, etc.) reject
+            # assistant-only message lists, so a user prefix is required; we
+            # subtract it out so the baseline reflects only the assistant frame.
             try:
-                baseline_tokens = self._thread_local.tokenizer.apply_chat_template(
-                    [{"role": "assistant", "content": ""}],
-                    tokenize=True,
+                tok = self._thread_local.tokenizer
+                prefix_rendered = tok.apply_chat_template(
+                    [_PREFIX_USER_MSG],
+                    tokenize=False,
                     add_generation_prompt=False,
                 )
-                self._thread_local.baseline = len(baseline_tokens)
+                prefix_len = len(tok.tokenize(prefix_rendered))
+                with_empty_assistant_rendered = tok.apply_chat_template(
+                    [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                with_empty_assistant_len = len(
+                    tok.tokenize(with_empty_assistant_rendered)
+                )
+                self._thread_local.prefix_len = prefix_len
+                self._thread_local.baseline = with_empty_assistant_len - prefix_len
             except Exception:
+                self._thread_local.prefix_len = 0
                 self._thread_local.baseline = 0
                 logger.warning(
                     "Failed to compute chat-template baseline for %s; tool-call token counts may be over-estimated",
@@ -119,15 +169,17 @@ class TokenizePool:
         if reasoning:
             msg["reasoning_content"] = reasoning
         if tool_calls:
-            msg["tool_calls"] = list(tool_calls)
+            msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
         try:
-            full = len(
-                tokenizer.apply_chat_template(
-                    [msg], tokenize=True, add_generation_prompt=False
-                )
+            rendered = tokenizer.apply_chat_template(
+                [_PREFIX_USER_MSG, msg],
+                tokenize=False,
+                add_generation_prompt=False,
             )
+            full = len(tokenizer.tokenize(rendered))
+            prefix_len = getattr(self._thread_local, "prefix_len", 0)
             baseline = getattr(self._thread_local, "baseline", 0)
-            return max(0, full - baseline)
+            return max(0, full - prefix_len - baseline)
         except Exception:
             tool_calls_json = (
                 msgspec.json.encode(list(tool_calls)).decode() if tool_calls else ""

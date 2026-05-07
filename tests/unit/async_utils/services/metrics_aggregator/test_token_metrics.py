@@ -109,20 +109,24 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
     """Tokenizer that supports apply_chat_template for tool-call testing."""
 
     def apply_chat_template(
-        self, messages, tokenize=True, add_generation_prompt=False
-    ) -> list[int]:
-        parts = []
+        self, messages, tokenize=False, add_generation_prompt=False
+    ):
+        # Simulate 2 wrapper tokens for the template frame.
+        parts = ["WRAPPER", "WRAPPER"]
         for msg in messages:
-            parts.append(msg.get("content") or "")
+            content = msg.get("content")
+            if content:
+                parts.append(content)
             if msg.get("reasoning_content"):
                 parts.append(msg["reasoning_content"])
             if msg.get("tool_calls"):
                 import msgspec
 
                 parts.append(msgspec.json.encode(msg["tool_calls"]).decode())
-        combined = " ".join(p for p in parts if p)
-        # Add 2 wrapper tokens to simulate template overhead
-        return [0, 0] + list(range(len(combined.split())))
+        rendered = " ".join(parts)
+        if tokenize:
+            return list(range(len(rendered.split())))
+        return rendered
 
 
 @pytest.mark.unit
