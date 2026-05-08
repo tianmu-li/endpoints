@@ -339,7 +339,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         Unlike single-turn datasets, multi-turn rows do not have a `prompt` column,
         so ColumnFilter (which requires prompt) is skipped. AddStaticColumns entries
-        from the adapter are applied via AddDefaultColumns (fill-missing-only) so that
+        from the adapter are applied via AddStaticColumns(..., overwrite=False)
+        (fill-missing-only) so that
         per-row dataset overrides are preserved.
 
         After transforms, only client turns (user + tool) are stored in self.data as
