@@ -104,19 +104,18 @@ and exits with code 1 if any mismatch is found. The script also:
 
 The extra fields supported beyond plain user/assistant:
 
-| Row role                         | Extra fields                                                       |
-| -------------------------------- | ------------------------------------------------------------------ |
-| `assistant` with tool calls      | `tool_calls: [{id, type, function: {name, arguments}}]`            |
-| `tool` single result             | `tool_call_id: <str>`, `content: <str>`                            |
-| `tool` parallel results (merged) | `tool_results: [{tool_call_id, content}, ...]`                     |
-| `user` or `tool` turns           | `tools: [...]` (OpenAI tool definitions forwarded to the endpoint) |
+| Row role                                   | Extra fields                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------ |
+| `assistant` with tool calls                | `tool_calls: [{id, type, function: {name, arguments}}]`            |
+| `tool` results (single or merged parallel) | `tool_results: [{tool_call_id, content}, ...]`                     |
+| `user` or `tool` turns                     | `tools: [...]` (OpenAI tool definitions forwarded to the endpoint) |
 
 Example rows from a converted agentic dataset:
 
 ```jsonl
 {"conversation_id": "sim_001", "turn": 1, "role": "user", "content": "Fix the bug in foo.py", "system": "You are a coding agent.", "tools": [...]}
 {"conversation_id": "sim_001", "turn": 2, "role": "assistant", "tool_calls": [{"id": "functions.bash:0", "type": "function", "function": {"name": "bash", "arguments": "{\"cmd\": \"cat foo.py\"}"}}]}
-{"conversation_id": "sim_001", "turn": 3, "role": "tool", "tool_call_id": "functions.bash:0", "content": "def foo():\n    return 1/0", "tools": [...]}
+{"conversation_id": "sim_001", "turn": 3, "role": "tool", "tool_results": [{"tool_call_id": "functions.bash:0", "content": "def foo():\n    return 1/0"}], "tools": [...]}
 {"conversation_id": "sim_001", "turn": 4, "role": "assistant", "content": "The bug is a ZeroDivisionError. Here is the fix: ..."}
 ```
 

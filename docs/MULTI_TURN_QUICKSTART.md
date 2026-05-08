@@ -135,8 +135,10 @@ Use the bundled validation script to check your JSONL file for schema errors bef
 python scripts/validate_jsonl_schema.py path/to/your/conversations.jsonl
 ```
 
-This catches missing required fields, invalid role sequences, non-consecutive turn numbers, and
-interleaved conversations — all errors that would otherwise surface at benchmark startup.
+This catches per-row schema errors (missing required fields, wrong types,
+malformed `tool_results`). Cross-row invariants (consecutive turn numbers,
+valid role sequences, grouped conversations) are enforced by
+`MultiTurnDataset` at load time and will surface at benchmark startup.
 
 ### "Conversation has invalid role sequence"
 
