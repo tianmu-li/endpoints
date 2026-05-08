@@ -47,6 +47,26 @@ logger = logging.getLogger(__name__)
 _WARMUP_ENABLED = os.environ.get("ENABLE_WARMUP") == "1"
 
 
+def _extract_prompt_text(messages: list[Any]) -> str | None:
+    """Join text content from an OpenAI messages list; handles list-form multimodal content."""
+    parts: list[str] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str) and c:
+            parts.append(c)
+        elif isinstance(c, list):
+            parts.extend(
+                p["text"]
+                for p in c
+                if isinstance(p, dict)
+                and p.get("type") == "text"
+                and isinstance(p.get("text"), str)
+            )
+    return "\n".join(parts) if parts else None
+
+
 # ---------------------------------------------------------------------------
 # Phase configuration
 # ---------------------------------------------------------------------------
@@ -204,12 +224,7 @@ class PhaseIssuer:
             token_ids = data.get("input_tokens") or data.get("token_ids")
             prompt_text = data.get("prompt")
             if prompt_text is None and "messages" in data:
-                parts: list[str] = [
-                    m["content"]
-                    for m in data["messages"]
-                    if isinstance(m, dict) and m.get("content")
-                ]
-                prompt_text = "\n".join(parts) if parts else None
+                prompt_text = _extract_prompt_text(data["messages"])
             prompt_data = PromptData(
                 text=prompt_text,
                 token_ids=tuple(token_ids) if token_ids is not None else None,
