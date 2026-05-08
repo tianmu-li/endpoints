@@ -1,32 +1,38 @@
 name: "agentic-coding-benchmark"
 version: "1.0"
 type: "online"
-
+# ibm-granite/granite-3.1-8b-instruct
+# Qwen/Qwen3.6-35B-A3B
 model_params:
-  name: "your-model-name" # Replace with your actual model name
-  max_new_tokens: 1024
+  name: "Qwen/Qwen3.6-35B-A3B" # Replace with your actual model name
+  temperature: 0.0
+  max_new_tokens: 8192
 
 datasets:
   - name: agentic_coding
     type: performance
     # Run: python scripts/convert_agentic_snapshot.py <input.jsonl> examples/09_MultiTurn/datasets/agentic_coding_flat.jsonl --verify
     # The datasets/ directory is a placeholder; populate it with the conversion script above.
-    path: examples/09_MultiTurn/datasets/agentic_coding_flat.jsonl
+    path: /home/tianmuli/vllm_test/datasets/agentic_coding_v2.jsonl
     multi_turn:
-      turn_timeout_s: 600.0
+      turn_timeout_s: 3000.0
 
 settings:
   runtime:
     min_duration_ms: 0
-    max_duration_ms: 3600000
+    max_duration_ms: 27000000
 
   load_pattern:
     type: multi_turn
-    target_concurrency: 4096
+    target_concurrency: 196
 
 endpoint_config:
   endpoints:
-    - "http://localhost:8868"
+    - "http://localhost:30000"
   api_type: openai
 
-report_dir: logs/agentic_coding
+report_dir: logs/agentic_coding_full_8192
+
+# Enable output collection for this performance run
+# Outputs will be stored in {report_dir}/events/ and {report_dir}/events.db
+collect_outputs: true

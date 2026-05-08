@@ -165,7 +165,6 @@ class TestBenchmarkCommandIntegration:
 
         assert "Mode:" in caplog.text
         assert "QPS: 20" in caplog.text
-        assert "Responses: False" in caplog.text
 
 
 TEMPLATE_DIR = (

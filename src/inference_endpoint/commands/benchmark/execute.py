@@ -70,7 +70,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
@@ -111,7 +111,7 @@ class ResponseCollector:
 
     def __init__(self, collect_responses: bool = False, pbar: tqdm | None = None):
         self.collect_responses = collect_responses
-        self.responses: dict[str, str] = {}
+        self.responses: dict[str, dict[str, Any]] = {}
         self.errors: list[str] = []
         self.count = 0
         self.pbar = pbar
@@ -124,7 +124,23 @@ class ResponseCollector:
             if self.pbar:
                 self.pbar.set_postfix(refresh=True, errors=len(self.errors))
         elif self.collect_responses:
-            self.responses[result.id] = result.get_response_output_string()
+            if isinstance(result.response_output, TextModelOutput):
+                ro = result.response_output
+                out = ro.output
+                content = "".join(out) if isinstance(out, tuple) else (out or "")
+                entry: dict[str, Any] = {"content": content}
+                if ro.reasoning:
+                    entry["reasoning"] = (
+                        "".join(ro.reasoning)
+                        if isinstance(ro.reasoning, tuple)
+                        else ro.reasoning
+                    )
+            else:
+                entry = {"content": result.get_response_output_string()}
+            tool_calls = result.metadata.get("tool_calls") if result.metadata else None
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            self.responses[result.id] = entry
         if self.pbar:
             self.pbar.update(1)
 
@@ -171,7 +187,10 @@ class BenchmarkContext:
 
     @property
     def collect_responses(self) -> bool:
-        return self.test_mode in (TestMode.ACC, TestMode.BOTH)
+        return (
+            self.test_mode in (TestMode.ACC, TestMode.BOTH)
+            or self.config.collect_outputs
+        )
 
     @property
     def benchmark_mode(self) -> TestType | None:
@@ -368,9 +387,8 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     if accuracy_datasets:
         total_samples += sum(ds.num_samples() * ds.repeats for ds in accuracy_datasets)
 
-    collect_responses = test_mode in (TestMode.ACC, TestMode.BOTH)
     logger.info(
-        f"Mode: {test_mode}, Target QPS: {config.settings.load_pattern.target_qps}, Responses: {collect_responses}"
+        f"Mode: {test_mode}, Target QPS: {config.settings.load_pattern.target_qps}"
     )
     logger.info(
         f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
@@ -714,6 +732,107 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied metrics from {src_metrics} -> {dst_metrics}")
 
 
+def _annotate_response_token_counts(
+    responses: dict[str, dict[str, Any]], tokenizer_name: str
+) -> None:
+    """Annotate each collected response with num_tokens.
+
+    Mirrors OslTrigger / TokenizePool._token_count_message_worker so counts
+    match OSL in report.txt:
+    - no tool_calls: tokenize(reasoning + content)
+    - with tool_calls: apply_chat_template(assistant message) - [user prefix] - [empty-assistant baseline]
+
+    Tool-call arguments arrive as OpenAI wire-format JSON strings, but the
+    Hermes-style Jinja template iterates ``arguments`` as a mapping — pass
+    strings and the render raises and we fall back to whitespace counting,
+    which inflates the result. Parse arguments to dict first.
+
+    Runs at finalize time off the hot path. Errors leave num_tokens unset.
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        logger.warning(
+            "transformers not installed; skipping num_tokens annotation in results.json"
+        )
+        return
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception as e:
+        logger.warning(
+            "Failed to load tokenizer '%s' for num_tokens annotation: %s",
+            tokenizer_name,
+            e,
+        )
+        return
+
+    prefix_msg = {"role": "user", "content": ""}
+    prefix_len = 0
+    baseline = 0
+    try:
+        prefix_rendered = tokenizer.apply_chat_template(
+            [prefix_msg], tokenize=False, add_generation_prompt=False
+        )
+        prefix_len = len(tokenizer.tokenize(prefix_rendered))
+        empty_rendered = tokenizer.apply_chat_template(
+            [prefix_msg, {"role": "assistant", "content": ""}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        baseline = len(tokenizer.tokenize(empty_rendered)) - prefix_len
+    except Exception:
+        logger.debug("Failed to compute chat-template baseline for num_tokens")
+
+    def _normalize(tc_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for tc in tc_list:
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    parsed = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    out.append(tc)
+                    continue
+                if isinstance(parsed, dict):
+                    out.append({**tc, "function": {**fn, "arguments": parsed}})
+                    continue
+            out.append(tc)
+        return out
+
+    for entry in responses.values():
+        content = entry.get("content") or ""
+        reasoning = entry.get("reasoning")
+        tool_calls = entry.get("tool_calls")
+        try:
+            if tool_calls:
+                msg: dict[str, Any] = {"role": "assistant", "content": content}
+                if reasoning:
+                    msg["reasoning_content"] = reasoning
+                msg["tool_calls"] = _normalize(list(tool_calls))
+                try:
+                    rendered = tokenizer.apply_chat_template(
+                        [prefix_msg, msg],
+                        tokenize=False,
+                        add_generation_prompt=False,
+                    )
+                    full = len(tokenizer.tokenize(rendered))
+                    entry["num_tokens"] = max(0, full - prefix_len - baseline)
+                except Exception:
+                    tool_calls_json = msgspec.json.encode(list(tool_calls)).decode()
+                    entry["num_tokens"] = len(
+                        tokenizer.tokenize(
+                            content + (reasoning or "") + tool_calls_json
+                        )
+                    )
+            else:
+                text = (reasoning or "") + content
+                entry["num_tokens"] = len(tokenizer.tokenize(text)) if text else 0
+        except Exception as e:
+            logger.debug("num_tokens tokenize failed: %s", e)
+
+
 def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     """Score accuracy, aggregate results, write JSON."""
     config = ctx.config
@@ -805,6 +924,8 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         if accuracy_scores:
             results["accuracy_scores"] = accuracy_scores
         if ctx.collect_responses:
+            if collector.responses and ctx.tokenizer_name:
+                _annotate_response_token_counts(collector.responses, ctx.tokenizer_name)
             results["responses"] = collector.responses
         if collector.errors:
             results["errors"] = collector.errors

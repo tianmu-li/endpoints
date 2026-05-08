@@ -532,6 +532,13 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             help="NUMA-aware CPU pinning",
         ),
     ] = True
+    collect_outputs: Annotated[
+        bool,
+        cyclopts.Parameter(
+            negative="--no-collect-outputs",
+            help="Collect and log response outputs for performance runs",
+        ),
+    ] = False
 
     @field_validator("datasets", mode="before")
     @classmethod
