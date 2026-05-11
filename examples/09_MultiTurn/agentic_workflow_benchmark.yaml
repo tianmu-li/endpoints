@@ -4,8 +4,12 @@ type: "online"
 
 model_params:
   name: "Qwen/Qwen3.6-35B-A3B" # Replace with your actual model name
-  temperature: 0.0
-  max_new_tokens: 32768
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  presence_penalty: 1.5
+  repetition_penalty: 1.0
+  max_new_tokens: 1024
 
 datasets:
   - name: agentic_workflow
@@ -23,14 +27,14 @@ settings:
 
   load_pattern:
     type: multi_turn
-    target_concurrency: 196
+    target_concurrency: 48
 
 endpoint_config:
   endpoints:
     - "http://localhost:30000"
   api_type: openai
 
-report_dir: logs/agentic_workflow_full_32768
+report_dir: logs/agentic_workflow_sampling_1024
 
 # Enable output collection for this performance run
 # Outputs will be stored in {report_dir}/events/ and {report_dir}/events.db

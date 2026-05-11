@@ -79,6 +79,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
+            "presence_penalty": model_params.presence_penalty,
         }
 
         # These fields are used in .to_endpoint_request() but don't exist in ModelParams,

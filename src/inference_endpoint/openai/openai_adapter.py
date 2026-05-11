@@ -53,6 +53,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
+            "presence_penalty": model_params.presence_penalty,
         }
 
         return [
@@ -113,6 +114,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             max_completion_tokens=query.data.get("max_completion_tokens", 100),
             temperature=query.data.get("temperature", 0.7),
             tools=query.data.get("tools"),
+            presence_penalty=query.data.get("presence_penalty"),
         )
         return request
 
