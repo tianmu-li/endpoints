@@ -40,7 +40,9 @@ class TestPrecomputeIslForMultiTurn:
             range(len(msgs) * 3)
         )
 
-        with patch("transformers.AutoTokenizer") as mock_cls:
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.AutoTokenizer"
+        ) as mock_cls:
             mock_cls.from_pretrained.return_value = mock_tokenizer
             _precompute_isl_for_multi_turn(dataloader, "test-model")
 
@@ -57,7 +59,9 @@ class TestPrecomputeIslForMultiTurn:
         dataloader = _make_dataloader(samples)
         mock_tokenizer = MagicMock()
 
-        with patch("transformers.AutoTokenizer") as mock_cls:
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.AutoTokenizer"
+        ) as mock_cls:
             mock_cls.from_pretrained.return_value = mock_tokenizer
             _precompute_isl_for_multi_turn(dataloader, "test-model")
 
@@ -81,7 +85,9 @@ class TestPrecomputeIslForMultiTurn:
         mock_tokenizer = MagicMock()
         mock_tokenizer.apply_chat_template.side_effect = side_effect
 
-        with patch("transformers.AutoTokenizer") as mock_cls:
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.AutoTokenizer"
+        ) as mock_cls:
             mock_cls.from_pretrained.return_value = mock_tokenizer
             with caplog.at_level("WARNING"):
                 _precompute_isl_for_multi_turn(dataloader, "test-model")
@@ -102,7 +108,9 @@ class TestPrecomputeIslForMultiTurn:
         mock_tokenizer = MagicMock()
         mock_tokenizer.apply_chat_template.return_value = batch_encoding
 
-        with patch("transformers.AutoTokenizer") as mock_cls:
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.AutoTokenizer"
+        ) as mock_cls:
             mock_cls.from_pretrained.return_value = mock_tokenizer
             _precompute_isl_for_multi_turn(dataloader, "test-model")
 
@@ -115,7 +123,9 @@ class TestPrecomputeIslForMultiTurn:
         mock_tokenizer = MagicMock()
         mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
 
-        with patch("transformers.AutoTokenizer") as mock_cls:
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.AutoTokenizer"
+        ) as mock_cls:
             mock_cls.from_pretrained.return_value = mock_tokenizer
             _precompute_isl_for_multi_turn(dataloader, "test-model")
 

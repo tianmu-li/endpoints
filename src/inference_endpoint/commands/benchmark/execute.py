@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-import jinja2
 import msgspec.json
 from huggingface_hub import model_info
 from tqdm import tqdm
@@ -328,7 +327,7 @@ def _precompute_isl_for_multi_turn(
             # instead of a plain list; extract .input_ids in that case.
             token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
             sample["input_tokens"] = token_ids
-        except (jinja2.TemplateError, KeyError, ValueError, TypeError):
+        except Exception:
             if not first_failure_logged:
                 logger.exception(
                     "ISL pre-computation: apply_chat_template failed (first failure shown)"
@@ -340,7 +339,8 @@ def _precompute_isl_for_multi_turn(
             "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
             skipped,
         )
-    if skipped == len([s for s in (dataloader.data or []) if s.get("messages")]):
+    total_with_messages = len([s for s in (dataloader.data or []) if s.get("messages")])
+    if total_with_messages > 0 and skipped == total_with_messages:
         raise RuntimeError(
             "ISL precomputation failed for all samples; check tokenizer/template compatibility"
         )
