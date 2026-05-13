@@ -139,7 +139,7 @@ class TestOpenAITextCompletionsAdapterDecodeSSE:
         json_bytes = msgspec.json.encode(msg)
         delta = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
         assert isinstance(delta, SSEDelta)
-        assert delta.content == ""
+        assert delta.content is None
 
     @pytest.mark.unit
     def test_decode_sse_empty_text_returns_empty_delta(self):
