@@ -470,6 +470,7 @@ class TestClientAPITypePropagation:
         assert config.settings.client.adapter is OpenAITextCompletionsAdapter
         assert config.settings.client.accumulator is OpenAISSEAccumulator
 
+
 class TestMultiTurnValidation:
     """Tests for multi-turn config validation and cross-validation."""
 
