@@ -142,7 +142,7 @@ class TokenizePool:
             except Exception:
                 self._thread_local.prefix_len = 0
                 self._thread_local.baseline = 0
-                logger.warning(
+                logger.exception(
                     "Failed to compute chat-template baseline for %s; tool-call token counts may be over-estimated",
                     self._tokenizer_name,
                 )
@@ -182,9 +182,12 @@ class TokenizePool:
             return max(0, full - prefix_len - baseline)
         except Exception:
             tool_calls_json = (
-                msgspec.json.encode(list(tool_calls)).decode() if tool_calls else ""
+                msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
             )
-            fallback_text = (content or "") + (reasoning or "") + tool_calls_json
+            parts = [
+                p for p in (content or None, reasoning or None, tool_calls_json) if p
+            ]
+            fallback_text = "\n".join(parts)
             return self._token_count_worker(fallback_text)
 
     def token_count(self, text: str) -> int:

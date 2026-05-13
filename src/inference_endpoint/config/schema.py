@@ -245,7 +245,7 @@ class MultiTurnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout_s: float = 300.0
+    turn_timeout_s: float = Field(default=300.0, gt=0)
     use_dataset_history: bool = True
 
 

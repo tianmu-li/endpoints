@@ -164,8 +164,8 @@ settings:
 
 **Behavior**:
 
-- With `target_concurrency`: Limits total in-flight requests across all conversations
-- Combines with turn sequencing: Turn N+1 still waits for turn N, AND waits for available slot
+- With `target_concurrency`: At most `target_concurrency` conversations are active simultaneously; each active conversation has exactly one in-flight turn at any time.
+- Turn sequencing is preserved: turn N+1 is issued only after turn N's response arrives.
 
 **Use cases**:
 
@@ -176,22 +176,22 @@ settings:
 **Example**: 100 conversations with `target_concurrency: 32`
 
 ```
-t=0:   Issue first 32 turn-1s (concurrency limit reached)
-t=0.5: Turn-1 completes → issue next turn-1 (slot filled)
-t=1.0: Turn-1 completes → issue turn-2 of completed conv (slot filled)
-...    Maintains ~32 in-flight across all conversations
+t=0:   Start 32 conversations, issue turn-1 for each (32 in-flight)
+t=0.5: Turn-1 of conv A completes → issue turn-2 of conv A (still 32 in-flight)
+t=1.0: All turns of conv B complete → start conv 33, issue its turn-1 (still 32 in-flight)
+...    Maintains at most 32 active conversations
 ```
 
 ### Turn Timeout
 
-Configure maximum wait time for previous turn completion:
+Configure the maximum time allowed between issuing a turn and receiving its response:
 
 ```yaml
 multi_turn:
   turn_timeout_s: 300.0 # 5 minutes
 ```
 
-If a turn times out waiting for the previous turn, it will be skipped and logged as a warning.
+If a turn does not receive a response within `turn_timeout_s` seconds, that turn is marked failed and all remaining turns in the same conversation are aborted (subsequent turns depend on the timed-out response). The event is logged as a warning.
 
 ## Running Multi-Turn Benchmarks
 
@@ -204,10 +204,10 @@ inference-endpoint benchmark from-config \
 
 ### Viewing Results
 
-Multi-turn benchmarks produce both per-turn and per-conversation metrics:
+Multi-turn benchmarks produce per-turn metrics:
 
 - **Per-turn metrics**: Latency, TTFT, TPOT for each individual turn
-- **Per-conversation metrics**: Total conversation latency, conversations per second
+- **Per-conversation metrics**: Total conversation latency, conversations per second _(planned — not yet implemented)_
 
 Results are stored in the configured `report_dir` with conversation metadata included in the events log (`events.jsonl`).
 
@@ -263,9 +263,9 @@ produce a properly sequenced flat-row file. The valid agentic sequence is:
 user -> assistant (tool_calls) -> tool -> [tool | assistant (tool_calls)]* -> assistant -> user -> ...
 ```
 
-### "Turn timed out waiting for prev turn"
+### "Turn timed out"
 
-**Cause**: Previous turn took longer than `turn_timeout_s` to complete.
+**Cause**: A turn did not receive a response within `turn_timeout_s` seconds after it was issued.
 
 **Fixes**:
 
@@ -281,7 +281,7 @@ Multi-turn logic is only activated when a `multi_turn:` block is present in the 
 
 Planned features:
 
-- [ ] Poisson conversation arrival mode implementation
-- [ ] Per-conversation metrics in reporting
+- [ ] Poisson conversation arrival mode
+- [ ] Per-conversation metrics in reporting (total conversation latency, conversations per second)
 - [ ] Conversation-level latency percentiles
 - [ ] Dynamic conversation branching

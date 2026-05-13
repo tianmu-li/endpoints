@@ -50,6 +50,7 @@ class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc
     must be audited; if so, remove gc=False.
     """
 
+    role: str | None = None
     content: str | None = None
     reasoning_content: str | None = None  # SGLang / DeepSeek field name
     reasoning: str | None = None  # vLLM field name

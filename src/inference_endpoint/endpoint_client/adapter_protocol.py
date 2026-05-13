@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,8 @@ from inference_endpoint.core.types import Query, QueryResult
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import ModelParams
     from inference_endpoint.dataset_manager.transforms import Transform
+
+logger = logging.getLogger(__name__)
 
 
 class HttpRequestAdapter(ABC):
@@ -107,11 +110,11 @@ class HttpRequestAdapter(ABC):
 
     @classmethod
     def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[Any]:
-        """
-        Parse SSE chunk and extract all chunk objects.
+        """Parse SSE chunk and extract all chunk objects.
 
         Extracts JSON documents from SSE stream and decodes them to chunk objects.
-        Silently ignores non-content SSE messages (role, finish_reason, etc).
+        Filters None returns from decode_sse_message and skips frames that fail
+        to decode (e.g. role-only or finish_reason-only frames).
 
         Args:
             buffer: Byte buffer containing SSE data
@@ -121,14 +124,13 @@ class HttpRequestAdapter(ABC):
             List of chunk objects extracted from the SSE chunk
         """
         json_docs = cls.SSE_DATA_PATTERN.findall(buffer[:end_pos])
-        parsed_contents = []
-
-        try:
-            for json_doc in json_docs:
+        parsed: list[Any] = []
+        for json_doc in json_docs:
+            try:
                 content = cls.decode_sse_message(json_doc)
-                parsed_contents.append(content)
-        except Exception:
-            # Normal for non-content SSE messages (role, finish_reason, etc)
-            pass
-
-        return parsed_contents
+            except Exception:
+                logger.debug("skipping non-content SSE frame: %s", json_doc[:120])
+                continue
+            if content is not None:
+                parsed.append(content)
+        return parsed

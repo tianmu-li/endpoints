@@ -36,6 +36,7 @@ from urllib.parse import urljoin
 import pandas as pd
 import pytest
 from inference_endpoint import metrics
+from inference_endpoint.commands.benchmark.execute import _precompute_isl_for_multi_turn
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     LoadPattern,
@@ -48,6 +49,7 @@ from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDatas
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
+from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
@@ -247,7 +249,7 @@ async def test_dataset_history_messages_present(echo_server):
                 payload = await request.json()
                 received_payloads.append(payload)
             except Exception:
-                pass
+                pass  # request body may not be JSON
             return await super()._handle_echo_chat_completions_request(request)
 
     server = CapturingEchoServer(port=0)
@@ -306,7 +308,7 @@ async def test_live_history_messages_grow_each_turn(echo_server):
                 payload = await request.json()
                 received_payloads.append(payload)
             except Exception:
-                pass
+                pass  # request body may not be JSON
             return await super()._handle_echo_chat_completions_request(request)
 
     server = CapturingEchoServer(port=0)
@@ -726,7 +728,7 @@ async def test_tools_field_forwarded_to_endpoint(echo_server):
                 payload = await request.json()
                 received_payloads.append(payload)
             except Exception:
-                pass
+                pass  # request body may not be JSON
             return await super()._handle_echo_chat_completions_request(request)
 
     server = CapturingEchoServer(port=0)
@@ -792,3 +794,67 @@ async def test_tools_field_forwarded_to_endpoint(echo_server):
             assert payload["tools"][0]["function"]["name"] == "search"
     finally:
         server.stop()
+
+
+@pytest.mark.integration
+def test_live_history_rejects_tool_turns():
+    """MultiTurnStrategy raises InputValidationError at __init__ when use_dataset_history=False
+    and the dataset contains tool-role turns.
+    """
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search", "arguments": '{"q": "hello"}'},
+        }
+    ]
+    tool_results = [{"tool_call_id": "call_1", "content": "result"}]
+    rows = [
+        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Search"},
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 3,
+            "role": "tool",
+            "tool_results": tool_results,
+        },
+    ]
+    ds = _make_dataset(rows)
+    mt_cfg = MultiTurnConfig(turn_timeout_s=10.0, use_dataset_history=False)
+    with pytest.raises(InputValidationError, match="use_dataset_history=True"):
+        MultiTurnStrategy(
+            conversation_manager=ConversationManager(),
+            dataset_metadata=ds.conversation_metadata,
+            multi_turn_config=mt_cfg,
+        )
+
+
+@pytest.mark.integration
+def test_isl_precomputed_for_dataset_history():
+    """_precompute_isl_for_multi_turn populates input_tokens for every sample with messages."""
+    pytest.importorskip("transformers")
+
+    rows = [
+        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hello"},
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "content": "Hi there",
+        },
+        {"conversation_id": "c1", "turn": 3, "role": "user", "content": "How are you?"},
+    ]
+    ds = _make_dataset(rows)
+    _precompute_isl_for_multi_turn(ds, "meta-llama/Llama-3.1-8B-Instruct")
+    samples_with_messages = [s for s in (ds.data or []) if s.get("messages")]
+    assert samples_with_messages, "expected at least one sample with messages"
+    for sample in samples_with_messages:
+        assert "input_tokens" in sample, f"sample missing input_tokens: {sample}"
+        assert isinstance(sample["input_tokens"], list)
+        assert len(sample["input_tokens"]) > 0

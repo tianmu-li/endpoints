@@ -22,7 +22,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from ..config.schema import MultiTurnConfig
-from ..core.types import QueryResult
+from ..core.types import ErrorData, QueryResult, TextModelOutput
+from ..exceptions import InputValidationError
 from .conversation_manager import ConversationManager, ConversationState
 from .strategy import PhaseIssuerProtocol
 
@@ -43,6 +44,10 @@ class MultiTurnStrategy:
 
     At most target_concurrency conversations are active simultaneously. When
     target_concurrency is None, all conversations start at once.
+
+    A turn-level timeout aborts the remaining client turns of that conversation
+    because subsequent turns depend on the timed-out response. The timed-out
+    turn and all downstream turns are marked failed.
 
     Integration with BenchmarkSession:
     - execute(): seeds conversations, awaits completion
@@ -87,6 +92,31 @@ class MultiTurnStrategy:
             if multi_turn_config is not None
             else False
         )
+
+        if self._store_in_history:
+            tool_turn_keys = [
+                key
+                for key, msgs in dataset_metadata.get(
+                    "current_turn_messages_by_key", {}
+                ).items()
+                if any(m.get("role") == "tool" for m in msgs)
+            ]
+            if tool_turn_keys:
+                raise InputValidationError(
+                    "Multi-turn with tool turns requires use_dataset_history=True. "
+                    "Live-history mode (use_dataset_history=False) with tool calls "
+                    "is not implemented yet. "
+                    f"Offending turn(s): {tool_turn_keys[:5]}"
+                    + (
+                        f" (+{len(tool_turn_keys) - 5} more)"
+                        if len(tool_turn_keys) > 5
+                        else ""
+                    )
+                )
+
+        # Composite on_sample_complete callback set by execute.py; used by
+        # _handle_timeout to route synthetic failure results.
+        self._session_on_sample_complete: Any | None = None
 
         # Maps query_id -> conversation_id for routing completions.
         self._inflight: dict[str, str] = {}
@@ -200,17 +230,6 @@ class MultiTurnStrategy:
                 "current_turn_messages_by_key", {}
             ).get((conv_id, turn))
             if current_turn_messages:
-                has_tool_msg = any(
-                    m.get("role") == "tool" for m in current_turn_messages
-                )
-                if has_tool_msg:
-                    logger.warning(
-                        "Live-history mode with tool messages uses dataset "
-                        "tool_call_ids; real endpoint IDs will differ "
-                        "(conv=%s, turn=%d)",
-                        conv_id,
-                        turn,
-                    )
                 live_messages = state.message_history.copy() + current_turn_messages
                 data_override = {"messages": live_messages}
 
@@ -254,12 +273,39 @@ class MultiTurnStrategy:
         self._conv_manager.mark_turn_failed(
             conv_id, store_in_history=self._store_in_history
         )
+
+        # Route a synthetic failure result so the accuracy collector and event
+        # logger see the timed-out turn.
+        if self._session_on_sample_complete is not None:
+            timeout_result = QueryResult(
+                id=query_id,
+                error=ErrorData(
+                    error_type="TurnTimeout",
+                    error_message=f"turn timeout after {self._turn_timeout_s}s",
+                ),
+            )
+            try:
+                self._session_on_sample_complete(timeout_result)
+            except Exception:
+                logger.exception(
+                    "on_sample_complete callback raised for timeout result (query=%s)",
+                    query_id,
+                )
+
         it = self._active_iters.pop(conv_id, None)
+        dropped = 0
         if it is not None:
             for _ in it:
                 self._conv_manager.mark_turn_failed(
                     conv_id, store_in_history=self._store_in_history
                 )
+                dropped += 1
+        if dropped:
+            logger.warning(
+                "turn timeout on conv=%s dropped %d remaining client turn(s)",
+                conv_id,
+                dropped,
+            )
 
         self._fill_slot()
 
@@ -279,13 +325,25 @@ class MultiTurnStrategy:
         """
         conv_id = self._inflight.pop(result.id, None)
         if conv_id is None:
+            logger.debug(
+                "dropping late response result=%s (no matching in-flight entry)",
+                result.id,
+            )
             return
 
         handle = self._timeout_handles.pop(result.id, None)
         if handle is not None:
             handle.cancel()
 
-        response_text = result.get_response_output_string()
+        output = result.response_output
+        if isinstance(output, TextModelOutput):
+            response_text: str | None = (
+                "".join(output.output)
+                if isinstance(output.output, tuple)
+                else output.output
+            ) or None
+        else:
+            response_text = output if isinstance(output, str) else None
 
         try:
             if result.error is not None:
@@ -295,13 +353,15 @@ class MultiTurnStrategy:
             else:
                 self._conv_manager.mark_turn_complete(
                     conv_id,
-                    response_text,
+                    response_text or "",
                     store_in_history=self._store_in_history,
                     metadata=result.metadata,
                 )
         except KeyError:
-            logger.warning(
-                "on_sample_complete: conversation %s not found in manager (result=%s)",
+            self._active_iters.pop(conv_id, None)
+            self._fill_slot()
+            logger.exception(
+                "on_sample_complete routing miss for conv=%s result=%s",
                 conv_id,
                 result.id,
             )
@@ -310,7 +370,7 @@ class MultiTurnStrategy:
         try:
             self._issue_next_turn(conv_id)
         except Exception as exc:
-            logger.error("Error issuing next turn for %s: %s", conv_id, exc)
+            logger.exception("Error issuing next turn for %s", conv_id)
             self._error = exc
             if self._all_done is not None:
                 self._all_done.set()

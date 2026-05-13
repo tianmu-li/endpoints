@@ -435,8 +435,12 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
             # Attach pre-built message list (system + history + current turn).
             key = (str(row["conversation_id"]), int(row["turn"]))
-            messages = pre_built.get(key, [])
-            sample["messages"] = messages
+            if key not in pre_built:
+                logger.warning(
+                    "dropping sample missing pre-built messages: key=%s", key
+                )
+                continue
+            sample["messages"] = pre_built[key]
 
             # Record dense 0-based index before appending (matches load_sample() position).
             key_to_sample_index[key] = len(client_turn_samples)

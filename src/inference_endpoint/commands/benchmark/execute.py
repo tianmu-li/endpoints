@@ -38,9 +38,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+import jinja2
 import msgspec.json
 from huggingface_hub import model_info
 from tqdm import tqdm
+from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -309,12 +311,9 @@ def _precompute_isl_for_multi_turn(
     Only affects dataset-history turns; live-history turns override 'messages'
     at runtime so the stored input_tokens are stale (acceptable approximation).
     """
-    # Local import: optional dependency, circular-import avoidance (consistent
-    # with _annotate_response_token_counts in this file).
-    from transformers import AutoTokenizer  # noqa: PLC0415
-
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     skipped = 0
+    first_failure_logged = False
     for sample in dataloader.data or []:
         messages = sample.get("messages")
         if not messages:
@@ -329,12 +328,21 @@ def _precompute_isl_for_multi_turn(
             # instead of a plain list; extract .input_ids in that case.
             token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
             sample["input_tokens"] = token_ids
-        except Exception:  # template errors vary by model; skip gracefully
+        except (jinja2.TemplateError, KeyError, ValueError, TypeError):
+            if not first_failure_logged:
+                logger.exception(
+                    "ISL pre-computation: apply_chat_template failed (first failure shown)"
+                )
+                first_failure_logged = True
             skipped += 1
     if skipped:
         logger.warning(
             "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
             skipped,
+        )
+    if skipped == len([s for s in (dataloader.data or []) if s.get("messages")]):
+        raise RuntimeError(
+            "ISL precomputation failed for all samples; check tokenizer/template compatibility"
         )
 
 
@@ -618,8 +626,21 @@ async def _run_benchmark_async(
         if multi_turn_strategy is not None:
 
             def _on_sample_complete(result: QueryResult) -> None:
-                multi_turn_strategy.on_sample_complete(result)
-                collector.on_complete_hook(result)
+                try:
+                    multi_turn_strategy.on_sample_complete(result)
+                except Exception:
+                    logger.exception(
+                        "multi_turn_strategy.on_sample_complete failed (result=%s)",
+                        result.id,
+                    )
+                try:
+                    collector.on_complete_hook(result)
+                except Exception:
+                    logger.exception(
+                        "collector.on_complete_hook failed (result=%s)", result.id
+                    )
+
+            multi_turn_strategy._session_on_sample_complete = _on_sample_complete
 
         else:
             _on_sample_complete = collector.on_complete_hook

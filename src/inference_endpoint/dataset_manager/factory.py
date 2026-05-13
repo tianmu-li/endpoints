@@ -101,7 +101,7 @@ class DataLoaderFactory:
             dataset_id = MultiTurnDataset.DATASET_ID
 
         transforms: list[Transform] = []
-        if remap is not None:
+        if remap is not None and dataset_id != MultiTurnDataset.DATASET_ID:
             # Parser convention is {target: source} (e.g. {prompt: article}).
             # ColumnRemap expects {source: target} — flip it.
             flipped = {src: dst for dst, src in remap.items()}
