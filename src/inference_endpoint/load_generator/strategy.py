@@ -54,9 +54,10 @@ class PhaseIssuerProtocol(Protocol):
 
         Args:
             sample_index: Index into the dataset.
-            data_override: If provided, use this as Query.data instead of
-                loading from the dataset. Used by MultiTurnStrategy for
-                live-history mode where the messages array is built at runtime.
+            data_override: If provided, merged over the loaded sample — keys in
+                data_override take precedence. Used by MultiTurnStrategy to inject
+                a runtime-assembled `messages` array while still inheriting
+                `model`/`max_completion_tokens`/`tools`/`stream` from the dataset row.
         """
         ...
 

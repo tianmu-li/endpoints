@@ -32,7 +32,8 @@ Multi-turn datasets use JSONL format with the following structure:
 ### Validation Rules
 
 1. All rows for a given `conversation_id` must appear **consecutively** in the file (no interleaving
-   with rows from other conversations). Turns within a conversation must be in order.
+   with rows from other conversations). File-order within a conversation does not matter — the
+   loader sorts by the `turn` column when building conversation history.
    The flat-row format is intentional: it enables row-by-row streaming without loading entire
    conversations into memory first.
 2. Conversations must follow a valid role sequence:

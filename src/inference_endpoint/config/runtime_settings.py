@@ -200,11 +200,19 @@ class RuntimeSettings:
             self.load_pattern is not None
             and self.load_pattern.type == LoadPatternType.MULTI_TURN
         ):
-            result = max(self.min_sample_count, self.n_samples_from_dataset)
+            if self.n_samples_from_dataset < self.min_sample_count:
+                logger.warning(
+                    "Multi-turn run: min_sample_count=%d exceeds dataset "
+                    "client-turn count=%d; using dataset size. Multi-turn cannot "
+                    "issue more samples than the dataset provides.",
+                    self.min_sample_count,
+                    self.n_samples_from_dataset,
+                )
             logger.debug(
-                f"Sample count: {result} (multi-turn: issuing all {self.n_samples_from_dataset} client turns)"
+                "Sample count: %d (multi-turn: issuing all client turns)",
+                self.n_samples_from_dataset,
             )
-            return result
+            return self.n_samples_from_dataset
 
         # If min_duration is 0, use all dataset samples (new CLI default behavior)
         if self.min_duration_ms == 0:

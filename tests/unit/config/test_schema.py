@@ -541,7 +541,7 @@ class TestMultiTurnTotalSamples:
         assert rt.total_samples_to_issue() == 4316
 
     @pytest.mark.unit
-    def test_multi_turn_respects_min_sample_count(self):
+    def test_multi_turn_clamps_to_dataset_size(self):
         lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
@@ -555,7 +555,7 @@ class TestMultiTurnTotalSamples:
             rng_sample_index=random.Random(0),
             load_pattern=lp,
         )
-        assert rt.total_samples_to_issue() == 100
+        assert rt.total_samples_to_issue() == 5
 
     @pytest.mark.unit
     def test_multi_turn_explicit_n_samples_takes_precedence(self):

@@ -90,6 +90,7 @@ class TokenizePool:
         self._tokenizer_name = tokenizer_name
         self._n_workers = n_workers
         self._thread_local = threading.local()
+        self._fallback_warned: set[str] = set()
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=n_workers,
             thread_name_prefix="TokenizePool",
@@ -180,7 +181,17 @@ class TokenizePool:
             prefix_len = getattr(self._thread_local, "prefix_len", 0)
             baseline = getattr(self._thread_local, "baseline", 0)
             return max(0, full - prefix_len - baseline)
-        except Exception:
+        except Exception as exc:
+            key = f"{self._tokenizer_name}:{type(exc).__name__}"
+            if key not in self._fallback_warned:
+                self._fallback_warned.add(key)
+                logger.exception(
+                    "apply_chat_template failed for %s (%s); falling back to "
+                    "whitespace tokenization. Tool-call OSL/TPOT may diverge "
+                    "from server-side counts for this run.",
+                    self._tokenizer_name,
+                    type(exc).__name__,
+                )
             tool_calls_json = (
                 msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
             )

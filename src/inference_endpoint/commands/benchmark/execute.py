@@ -445,6 +445,18 @@ def _build_phases(
             )
         else:
             acc_load_pattern = perf_lp
+        if (
+            acc_load_pattern is not None
+            and acc_load_pattern.type == LoadPatternType.MULTI_TURN
+            and not isinstance(acc_ds, MultiTurnDataset)
+        ):
+            raise InputValidationError(
+                f"Accuracy phase '{eval_cfg.dataset_name}' would use MULTI_TURN "
+                "load pattern but its dataset is not a MultiTurnDataset. This is "
+                "currently blocked by schema validation; if you're seeing this, "
+                "update _build_phases to construct a dedicated MultiTurnStrategy "
+                "for the accuracy phase."
+            )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,

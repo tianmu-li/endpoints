@@ -239,7 +239,10 @@ class MultiTurnConfig(BaseModel):
     Presence of this block in the dataset config enables multi-turn mode.
 
     Attributes:
-        turn_timeout_s: Maximum seconds to wait for previous turn completion.
+        turn_timeout_s: Deadline between issuing a turn and receiving its
+            response. A timeout aborts that turn and all remaining client
+            turns of the same conversation because subsequent turns depend
+            on the timed-out response.
         use_dataset_history: If True, use pre-built message history from dataset.
     """
 
