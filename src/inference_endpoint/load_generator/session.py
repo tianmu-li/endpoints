@@ -174,6 +174,7 @@ class PhaseIssuer:
         "_publisher",
         "_stop_check",
         "uuid_to_index",
+        "uuid_to_conv_info",
         "inflight",
         "issued_count",
     )
@@ -190,11 +191,16 @@ class PhaseIssuer:
         self._publisher = publisher
         self._stop_check = stop_check
         self.uuid_to_index: dict[str, int] = {}
+        self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.inflight: int = 0
         self.issued_count: int = 0
 
     def issue(
-        self, sample_index: int, data_override: dict[str, Any] | None = None
+        self,
+        sample_index: int,
+        data_override: dict[str, Any] | None = None,
+        conversation_id: str = "",
+        turn: int | None = None,
     ) -> str | None:
         """Load data, build Query, publish ISSUED, send to endpoint.
 
@@ -218,6 +224,7 @@ class PhaseIssuer:
             data = {**data, **data_override}
         query = Query(id=query_id, data=data)
         self.uuid_to_index[query_id] = sample_index
+        self.uuid_to_conv_info[query_id] = (conversation_id, turn)
         ts = time.monotonic_ns()
         prompt_data: PromptData
         if isinstance(data, dict):
@@ -242,6 +249,8 @@ class PhaseIssuer:
                 event_type=SampleEventType.ISSUED,
                 timestamp_ns=ts,
                 sample_uuid=query_id,
+                conversation_id=conversation_id,
+                turn=turn,
                 data=prompt_data,
             )
         )
@@ -443,6 +452,11 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
+            conv_id_str, turn_num = ("", None)
+            if phase_issuer is not None:
+                conv_id_str, turn_num = phase_issuer.uuid_to_conv_info.pop(
+                    query_id, ("", None)
+                )
             self._publisher.publish(
                 EventRecord(
                     event_type=SampleEventType.COMPLETE,
@@ -450,6 +464,8 @@ class BenchmarkSession:
                     if isinstance(resp.completed_at, int)
                     else time.monotonic_ns(),
                     sample_uuid=query_id,
+                    conversation_id=conv_id_str,
+                    turn=turn_num,
                     data=resp.response_output,
                 )
             )
@@ -459,6 +475,8 @@ class BenchmarkSession:
                         event_type=ErrorEventType.GENERIC,
                         timestamp_ns=time.monotonic_ns(),
                         sample_uuid=query_id,
+                        conversation_id=conv_id_str,
+                        turn=turn_num,
                         data=resp.error,
                     )
                 )
