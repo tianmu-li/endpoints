@@ -187,6 +187,14 @@ class ModelParams(BaseModel):
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Per-request chat-template kwargs forwarded to vLLM/SGLang "
+            "(e.g. {'thinking': True, 'preserve_thinking': True} for Kimi-K2.6 "
+            "agentic multi-turn workloads)."
+        ),
+    )
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
@@ -247,6 +255,11 @@ class MultiTurnConfig(BaseModel):
         enable_salt: If True, append a per-trajectory hash to the end of each
             trajectory's system message to prevent KV cache reuse across
             trajectories. See ``examples/09_MultiTurn/docs/EVALUATION.md``.
+        inject_tool_delay: If True, sleep ``delay_seconds`` (from the dataset's
+            tool rows) between turns to replay the wall-clock the tool took in
+            the original capture. Default False so existing datasets without
+            the field, or runs where tool wall-clock should not be modeled,
+            behave the same as before.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -254,6 +267,7 @@ class MultiTurnConfig(BaseModel):
     turn_timeout_s: float = Field(default=300.0, gt=0)
     use_dataset_history: bool = True
     enable_salt: bool = False
+    inject_tool_delay: bool = False
 
 
 class Dataset(BaseModel):
