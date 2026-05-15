@@ -160,17 +160,47 @@ def test_multi_turn_isl_uses_precomputed_token_count():
         assert len(sample["input_tokens"]) > 0, f"Sample {i} input_tokens is empty"
 
 
+_TOOL_CALLS = (
+    {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "search", "arguments": '{"q":"hello"}'},
+    },
+)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_multi_turn_aggregator_records_isl_osl_tpot_streaming(tmp_path: Path):
-    """MetricsAggregatorService records ISL, OSL, and TPOT for a streamed multi-turn turn."""
+@pytest.mark.parametrize(
+    ("first_chunk", "later_chunk", "complete_data"),
+    [
+        (
+            TextModelOutput(output=("chunk1",)),
+            TextModelOutput(output=("chunk2",)),
+            TextModelOutput(output=("chunk1", "chunk2", "chunk3")),
+        ),
+        (
+            TextModelOutput(output=(), tool_calls=_TOOL_CALLS),
+            TextModelOutput(output=(), tool_calls=_TOOL_CALLS),
+            TextModelOutput(output=(), tool_calls=_TOOL_CALLS),
+        ),
+    ],
+    ids=["text", "tool_calls_only"],
+)
+async def test_multi_turn_aggregator_records_metrics_streaming(
+    tmp_path: Path,
+    first_chunk: TextModelOutput,
+    later_chunk: TextModelOutput,
+    complete_data: TextModelOutput,
+):
+    """TTFT/ISL/OSL/TPOT fire for streamed multi-turn turns (text and tool-call payloads)."""
     loop = asyncio.get_event_loop()
     shutdown_event = asyncio.Event()
     with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
         agg, registry = _make_aggregator_with_mock_publisher(
             ctx,
             loop,
-            "test_mt_isl_osl_tpot",
+            "test_mt_streaming_metrics",
             shutdown_event,
             tokenize_pool=_MockTokenizePool(),
         )
@@ -198,7 +228,7 @@ async def test_multi_turn_aggregator_records_isl_osl_tpot_streaming(tmp_path: Pa
                     SampleEventType.RECV_FIRST,
                     uuid,
                     ts=ts(),
-                    data=TextModelOutput(output=("chunk1",)),
+                    data=first_chunk,
                     conversation_id="c1",
                     turn=1,
                 ),
@@ -206,15 +236,7 @@ async def test_multi_turn_aggregator_records_isl_osl_tpot_streaming(tmp_path: Pa
                     SampleEventType.RECV_NON_FIRST,
                     uuid,
                     ts=ts(),
-                    data=TextModelOutput(output=("chunk2",)),
-                    conversation_id="c1",
-                    turn=1,
-                ),
-                _sample_event(
-                    SampleEventType.RECV_NON_FIRST,
-                    uuid,
-                    ts=ts(),
-                    data=TextModelOutput(output=("chunk3",)),
+                    data=later_chunk,
                     conversation_id="c1",
                     turn=1,
                 ),
@@ -222,7 +244,7 @@ async def test_multi_turn_aggregator_records_isl_osl_tpot_streaming(tmp_path: Pa
                     SampleEventType.COMPLETE,
                     uuid,
                     ts=ts(),
-                    data=TextModelOutput(output=("chunk1", "chunk2", "chunk3")),
+                    data=complete_data,
                     conversation_id="c1",
                     turn=1,
                 ),
@@ -237,14 +259,14 @@ async def test_multi_turn_aggregator_records_isl_osl_tpot_streaming(tmp_path: Pa
                     break
                 await asyncio.sleep(0.05)
 
-            assert (
-                _snapshot_series_count(registry, MetricSeriesKey.ISL.value) > 0
-            ), "ISL must be recorded"
-            assert (
-                _snapshot_series_count(registry, MetricSeriesKey.OSL.value) > 0
-            ), "OSL must be recorded"
-            assert (
-                _snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) > 0
-            ), "TPOT must be recorded"
+            for key in (
+                MetricSeriesKey.ISL,
+                MetricSeriesKey.TTFT_NS,
+                MetricSeriesKey.OSL,
+                MetricSeriesKey.TPOT_NS,
+            ):
+                assert (
+                    _snapshot_series_count(registry, key.value) > 0
+                ), f"{key.value} must be recorded"
         finally:
             agg.close()
