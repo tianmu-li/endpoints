@@ -39,15 +39,23 @@ class FakePhaseIssuer:
         self.issued_count = 0
         self.inflight: int = 0
         self.uuid_to_index: dict[str, int] = {}
+        self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
 
-    def issue(self, sample_index: int, data_override: dict | None = None) -> str | None:
+    def issue(
+        self,
+        sample_index: int,
+        data_override: dict | None = None,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
         if self._stop_after is not None and self._count >= self._stop_after:
             return None
         self._count += 1
         self.issued_count += 1
         query_id = f"q{sample_index:04d}"
         self.issued.append(sample_index)
+        self.uuid_to_conv_info[query_id] = (conversation_id, turn)
         return query_id
 
 
@@ -108,8 +116,13 @@ async def test_single_conversation_multi_turn():
     issued_order: list[str] = []
     original_issue = issuer.issue
 
-    def tracked_issue(idx, data_override=None):
-        q = original_issue(idx, data_override=data_override)
+    def tracked_issue(idx, data_override=None, conversation_id="", turn=None):
+        q = original_issue(
+            idx,
+            data_override=data_override,
+            conversation_id=conversation_id,
+            turn=turn,
+        )
         if q:
             issued_order.append(q)
         return q
@@ -170,7 +183,13 @@ async def test_turn_ordering_enforced():
         issued_count = 0
         issued: list[int] = []
 
-        def issue(self, idx: int, data_override: dict | None = None) -> str | None:
+        def issue(
+            self,
+            idx: int,
+            data_override: dict | None = None,
+            conversation_id: str = "",
+            turn: int | None = None,
+        ) -> str | None:
             import time
 
             issue_timestamps[idx] = time.monotonic()
@@ -395,7 +414,13 @@ async def test_pipeline_error_propagated():
         issued_count = 0
         issued: list[int] = []
 
-        def issue(self, idx: int, data_override: dict | None = None) -> str | None:
+        def issue(
+            self,
+            idx: int,
+            data_override: dict | None = None,
+            conversation_id: str = "",
+            turn: int | None = None,
+        ) -> str | None:
             raise RuntimeError("simulated pipeline error")
 
     with pytest.raises(RuntimeError, match="simulated pipeline error"):
@@ -603,6 +628,7 @@ async def test_timeout_publishes_error_and_complete_events():
 
     issuer = FakePhaseIssuer()
     issuer.uuid_to_index["q-x"] = 0
+    issuer.uuid_to_conv_info["q-x"] = ("conv-x", 1)
     issuer.inflight = 1
 
     strategy._all_done = asyncio.Event()
@@ -614,6 +640,8 @@ async def test_timeout_publishes_error_and_complete_events():
     assert publisher.publish.call_count == 2
     assert issuer.inflight == 0
     assert "q-x" in issuer.completed_uuids
+    # Conv info must be cleared so a late real response can't reuse stale state.
+    assert "q-x" not in issuer.uuid_to_conv_info
     first_call, second_call = publisher.publish.call_args_list
     first_record = first_call.args[0]
     second_record = second_call.args[0]
@@ -622,6 +650,40 @@ async def test_timeout_publishes_error_and_complete_events():
     assert first_record.sample_uuid == "q-x"
     assert second_record.event_type == SampleEventType.COMPLETE
     assert second_record.sample_uuid == "q-x"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_issue_passes_conversation_id_and_turn_to_phase_issuer():
+    """MultiTurnStrategy must forward (conv_id, turn) to phase_issuer.issue()."""
+    conv_manager = ConversationManager()
+    conversations = {"conv-A": [1, 2], "conv-B": [1]}
+    metadata = _make_dataset_metadata(conversations)
+    strategy = MultiTurnStrategy(conv_manager, metadata)
+    issuer = FakePhaseIssuer()
+
+    # Build the expected (query_id -> (conv_id, turn)) map from the same
+    # sample_index ordering _make_dataset_metadata uses, so the test does not
+    # encode that ordering as magic numbers.
+    expected: dict[str, tuple[str, int]] = {}
+    sample_index = 0
+    for conv_id, turns in conversations.items():
+        for turn in turns:
+            expected[f"q{sample_index:04d}"] = (conv_id, turn)
+            sample_index += 1
+
+    async def respond_in_order():
+        await asyncio.sleep(0.01)
+        for query_id in expected:
+            strategy.on_sample_complete(
+                QueryResult(id=query_id, response_output=TextModelOutput(output="ok"))
+            )
+            await asyncio.sleep(0.005)
+
+    asyncio.create_task(respond_in_order())
+    await strategy.execute(issuer)
+
+    assert issuer.uuid_to_conv_info == expected
 
 
 @pytest.mark.unit

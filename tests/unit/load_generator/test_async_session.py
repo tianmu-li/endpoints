@@ -161,11 +161,15 @@ class TestPhaseIssuer:
         assert len(issuer.issued_queries) == 1
         assert issuer.issued_queries[0].id == result
         assert 3 in phase_issuer.uuid_to_index.values()
+        # Single-turn callers omit conv_id/turn — defaults flow through.
+        assert phase_issuer.uuid_to_conv_info[result] == ("", None)
 
         # Should have published ISSUED event
         issued_events = publisher.events_of_type(SampleEventType.ISSUED)
         assert len(issued_events) == 1
         assert issued_events[0].sample_uuid == result
+        assert issued_events[0].conversation_id == ""
+        assert issued_events[0].turn is None
 
     def test_issue_returns_none_when_stopped(self):
         dataset = FakeDataset(5)
@@ -187,6 +191,23 @@ class TestPhaseIssuer:
 
         ids = [phase_issuer.issue(i % 5) for i in range(10)]
         assert len(set(ids)) == 10
+
+    def test_issue_stamps_conversation_id_and_turn_on_issued_event(self):
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+
+        query_id = phase_issuer.issue(2, conversation_id="conv-1", turn=3)
+        assert query_id is not None
+        assert phase_issuer.uuid_to_conv_info[query_id] == ("conv-1", 3)
+
+        issued = publisher.events_of_type(SampleEventType.ISSUED)
+        assert len(issued) == 1
+        assert issued[0].sample_uuid == query_id
+        assert issued[0].conversation_id == "conv-1"
+        assert issued[0].turn == 3
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +591,46 @@ class TestBenchmarkSession:
             f"aggregator correctness; got error at idx {error_idx}, "
             f"complete at idx {complete_idx}"
         )
+
+    @pytest.mark.asyncio
+    async def test_handle_response_stamps_conversation_id_and_turn(self):
+        """Both COMPLETE and ERROR events inherit the (conv_id, turn) seeded at
+        issue time; the entry is popped so late duplicates can't reuse it."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+
+        phase_issuer = PhaseIssuer(FakeDataset(2), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+
+        # Success path: COMPLETE inherits conv info, entry is popped.
+        phase_issuer.uuid_to_index["q-ok"] = 0
+        phase_issuer.uuid_to_conv_info["q-ok"] = ("conv-9", 5)
+        phase_issuer.inflight = 1
+        session._handle_response(
+            QueryResult(id="q-ok", response_output="ok", completed_at=12345)
+        )
+        complete = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
+        assert "q-ok" not in phase_issuer.uuid_to_conv_info
+
+        # Error path: ERROR (emitted before COMPLETE) also carries conv info.
+        phase_issuer.uuid_to_index["q-err"] = 1
+        phase_issuer.uuid_to_conv_info["q-err"] = ("conv-err", 2)
+        phase_issuer.inflight = 1
+        session._handle_response(
+            QueryResult(
+                id="q-err",
+                error=ErrorData(error_type="boom", error_message="x"),
+            )
+        )
+        error_events = [
+            e for e in publisher.events if isinstance(e.event_type, ErrorEventType)
+        ]
+        assert [(e.conversation_id, e.turn) for e in error_events] == [("conv-err", 2)]
+        complete = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert (complete[-1].conversation_id, complete[-1].turn) == ("conv-err", 2)
 
 
 @pytest.mark.unit

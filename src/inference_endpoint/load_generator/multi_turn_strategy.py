@@ -238,7 +238,12 @@ class MultiTurnStrategy:
                 }
 
         assert self._phase_issuer is not None
-        query_id = self._phase_issuer.issue(idx, data_override=data_override)
+        query_id = self._phase_issuer.issue(
+            idx,
+            data_override=data_override,
+            conversation_id=conv_id,
+            turn=turn,
+        )
         if query_id is None:
             # Session stopping — signal done.
             assert self._all_done is not None
@@ -278,6 +283,8 @@ class MultiTurnStrategy:
             self._phase_issuer.inflight -= 1  # type: ignore[attr-defined]
             if hasattr(self._phase_issuer, "completed_uuids"):
                 self._phase_issuer.completed_uuids.add(query_id)  # type: ignore[attr-defined]
+            if hasattr(self._phase_issuer, "uuid_to_conv_info"):
+                self._phase_issuer.uuid_to_conv_info.pop(query_id, None)  # type: ignore[attr-defined]
 
         logger.warning(
             "Turn timed out for conversation %s (query=%s)", conv_id, query_id

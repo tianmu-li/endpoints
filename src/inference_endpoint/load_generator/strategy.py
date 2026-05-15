@@ -48,7 +48,11 @@ class PhaseIssuerProtocol(Protocol):
     """Minimal interface that strategies see for issuing samples."""
 
     def issue(
-        self, sample_index: int, data_override: dict[str, Any] | None = None
+        self,
+        sample_index: int,
+        data_override: dict[str, Any] | None = None,
+        conversation_id: str = "",
+        turn: int | None = None,
     ) -> str | None:
         """Issue a sample. Returns query_id, or None if the session is stopping.
 
@@ -58,6 +62,10 @@ class PhaseIssuerProtocol(Protocol):
                 data_override take precedence. Used by MultiTurnStrategy to inject
                 a runtime-assembled `messages` array while still inheriting
                 `model`/`max_completion_tokens`/`tools`/`stream` from the dataset row.
+            conversation_id: Conversation identifier (multi-turn). Empty string
+                for single-turn issues; propagated onto the published EventRecords
+                so downstream consumers can group by conversation.
+            turn: Turn number within a conversation (multi-turn), or None.
         """
         ...
 
