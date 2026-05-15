@@ -945,3 +945,23 @@ class TestExtractPromptText:
     def test_non_dict_messages_skipped(self):
         messages = ["not a dict", {"role": "user", "content": "Valid"}]
         assert _extract_prompt_text(messages) == "Valid"
+
+    def test_tool_calls_included(self):
+        messages = [
+            {"role": "user", "content": "What's the weather?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        result = _extract_prompt_text(messages)
+        assert result is not None
+        assert "What's the weather?" in result
+        assert "get_weather" in result

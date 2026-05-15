@@ -479,6 +479,7 @@ def test_multi_turn_dataset_additional_fields():
         sample = dataset.load_sample(0)
         assert sample["model"] == "gpt-4"
         assert sample["max_completion_tokens"] == 256
+        assert sample["max_tokens"] == 256
         assert sample["temperature"] == pytest.approx(0.7)
 
     finally:

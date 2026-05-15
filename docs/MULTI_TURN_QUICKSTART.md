@@ -211,8 +211,10 @@ datasets:
 ### 1. Use the Example Dataset
 
 ```bash
-cd examples/09_MultiTurn
-inference-endpoint benchmark from-config --config multi_turn_benchmark.yaml
+# Run from the repository root — dataset paths in the bundled YAML are
+# repo-relative (e.g. examples/09_MultiTurn/customer_support_conversations.jsonl).
+inference-endpoint benchmark from-config \
+    --config examples/09_MultiTurn/multi_turn_benchmark.yaml
 ```
 
 ### 2. Check the Logs

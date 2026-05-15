@@ -16,9 +16,11 @@
 """Unit tests for MultiTurnStrategy."""
 
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
-from inference_endpoint.core.types import QueryResult, TextModelOutput
+from inference_endpoint.core.record import ErrorEventType, SampleEventType
+from inference_endpoint.core.types import ErrorData, QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.multi_turn_dataset import (
     ConversationMetadata,
     ConversationSampleEntry,
@@ -247,6 +249,7 @@ async def test_error_response_marks_turn_failed():
     strategy = MultiTurnStrategy(conv_manager, metadata)
 
     strategy._inflight["q0001"] = "conv1"
+    strategy._all_done = asyncio.Event()
 
     result = QueryResult(
         id="q0001",
@@ -579,3 +582,73 @@ async def test_conversation_slot_reuse():
     # Single slot: conv1 turns (samples 0,1) must be issued before conv2 turns (2,3)
     assert issuer.issued[:2] == [0, 1], "Conv1 turns should be issued before conv2"
     assert issuer.issued[2:] == [2, 3], "Conv2 turns should follow conv1"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_timeout_publishes_error_and_complete_events():
+    """_handle_timeout publishes ERROR then COMPLETE EventRecords via session_publisher."""
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("conv-x", expected_client_turns=1)
+    metadata = _make_dataset_metadata({"conv-x": [1]})
+    strategy = MultiTurnStrategy(conv_manager, metadata)
+
+    publisher = MagicMock()
+    strategy._session_publisher = publisher
+
+    # Seed _inflight so _handle_timeout finds the entry
+    strategy._inflight["q-x"] = "conv-x"
+    strategy._active_iters["conv-x"] = iter([])
+
+    strategy._all_done = asyncio.Event()
+    strategy._loop = asyncio.get_running_loop()
+    strategy._phase_issuer = None
+
+    strategy._handle_timeout("q-x", "conv-x")
+
+    assert publisher.publish.call_count == 2
+    first_call, second_call = publisher.publish.call_args_list
+    first_record = first_call.args[0]
+    second_record = second_call.args[0]
+
+    assert first_record.event_type == ErrorEventType.GENERIC
+    assert first_record.sample_uuid == "q-x"
+    assert second_record.event_type == SampleEventType.COMPLETE
+    assert second_record.sample_uuid == "q-x"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_error_turn_aborts_remaining_turns():
+    """on_sample_complete with result.error aborts and marks-failed remaining turns."""
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("conv1", expected_client_turns=3)
+    metadata = _make_dataset_metadata({"conv1": [1, 2, 3]})
+    strategy = MultiTurnStrategy(conv_manager, metadata)
+    issuer = FakePhaseIssuer()
+
+    strategy._all_done = asyncio.Event()
+    strategy._loop = asyncio.get_running_loop()
+    strategy._phase_issuer = issuer
+
+    # Seed: conv1 is active with turns 2 and 3 still pending
+    remaining_turns = iter([(1, 2), (2, 3)])
+    strategy._active_iters["conv1"] = remaining_turns
+    strategy._inflight["q0001"] = "conv1"
+    strategy._conv_states["conv1"] = conv_manager.get_state("conv1")
+
+    result = QueryResult(
+        id="q0001",
+        response_output=None,
+        error=ErrorData(
+            error_type="endpoint_error", error_message="500 Internal Server Error"
+        ),
+    )
+    strategy.on_sample_complete(result)
+
+    # Conversation should no longer be active
+    assert "conv1" not in strategy._active_iters
+    # Remaining 2 turns were marked failed
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    assert state.failed_turns == 3  # the failing turn + 2 dropped

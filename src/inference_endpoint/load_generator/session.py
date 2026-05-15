@@ -21,6 +21,7 @@ See docs/load_generator/DESIGN.md for the full design.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -64,6 +65,9 @@ def _extract_prompt_text(messages: list[Any]) -> str | None:
                 and p.get("type") == "text"
                 and isinstance(p.get("text"), str)
             )
+        tc = m.get("tool_calls")
+        if tc:
+            parts.append(json.dumps(tc, separators=(",", ":")))
     return "\n".join(parts) if parts else None
 
 

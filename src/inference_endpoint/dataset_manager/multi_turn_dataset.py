@@ -517,6 +517,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             max_tokens_val = (
                 sample.pop("max_new_tokens", None)
                 or sample.get("max_completion_tokens")
+                or sample.get("max_tokens")
                 or 128
             )
             sample["max_new_tokens"] = max_tokens_val

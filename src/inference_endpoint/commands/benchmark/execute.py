@@ -309,7 +309,15 @@ def _precompute_isl_for_multi_turn(
     Only affects dataset-history turns; live-history turns override 'messages'
     at runtime so the stored input_tokens are stale (acceptable approximation).
     """
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception:
+        logger.exception(
+            "ISL pre-computation: failed to load tokenizer %s; "
+            "falling back to text-tokenization at runtime",
+            tokenizer_name,
+        )
+        return
     skipped = 0
     first_failure_logged = False
     for sample in dataloader.data or []:
@@ -327,8 +335,10 @@ def _precompute_isl_for_multi_turn(
                         ),
                     }
                 normalized_messages.append(msg)
+            tools = sample.get("tools")
             raw = tokenizer.apply_chat_template(
                 normalized_messages,
+                tools=tools if tools else None,
                 tokenize=True,
                 add_generation_prompt=True,
             )
@@ -441,7 +451,6 @@ def _build_phases(
 
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
-    perf_lp = ctx.rt_settings.load_pattern
     for eval_cfg in ctx.eval_configs:
         acc_ds = eval_cfg.dataset
         if isinstance(acc_ds, MultiTurnDataset):
@@ -449,15 +458,12 @@ def _build_phases(
                 f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
                 "which is not yet supported for accuracy evaluation."
             )
-        if perf_lp is not None and perf_lp.type == LoadPatternType.MULTI_TURN:
-            # Plain accuracy datasets are single-turn; the multi-turn scheduler
-            # requires MultiTurnDataset. Downgrade to CONCURRENCY with same cap.
-            acc_load_pattern: LoadPattern | None = LoadPattern(
-                type=LoadPatternType.CONCURRENCY,
-                target_concurrency=perf_lp.target_concurrency,
-            )
-        else:
-            acc_load_pattern = perf_lp
+        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
+        # would silently rate-limit evaluation until a multi-turn accuracy strategy
+        # and QPS-budgeting support are added.
+        acc_load_pattern: LoadPattern | None = LoadPattern(
+            type=LoadPatternType.MAX_THROUGHPUT
+        )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,
@@ -660,6 +666,7 @@ async def _run_benchmark_async(
                     )
 
             multi_turn_strategy._session_on_sample_complete = _on_sample_complete
+            multi_turn_strategy._session_publisher = publisher
 
         else:
             _on_sample_complete = collector.on_complete_hook

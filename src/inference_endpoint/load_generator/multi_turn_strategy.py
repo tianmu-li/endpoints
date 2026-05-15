@@ -17,11 +17,13 @@
 
 import asyncio
 import logging
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterator
 from typing import Any
 
 from ..config.schema import MultiTurnConfig
+from ..core.record import ErrorEventType, EventRecord, SampleEventType
 from ..core.types import ErrorData, QueryResult, TextModelOutput
 from ..dataset_manager.multi_turn_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
@@ -116,6 +118,7 @@ class MultiTurnStrategy:
         # Composite on_sample_complete callback set by execute.py; used by
         # _handle_timeout to route synthetic failure results.
         self._session_on_sample_complete: Any | None = None
+        self._session_publisher: Any | None = None
 
         # Maps query_id -> conversation_id for routing completions.
         self._inflight: dict[str, str] = {}
@@ -273,7 +276,6 @@ class MultiTurnStrategy:
             and query_id in self._phase_issuer.uuid_to_index  # type: ignore[attr-defined]
         ):
             self._phase_issuer.inflight -= 1  # type: ignore[attr-defined]
-            del self._phase_issuer.uuid_to_index[query_id]  # type: ignore[attr-defined]
 
         logger.warning(
             "Turn timed out for conversation %s (query=%s)", conv_id, query_id
@@ -285,14 +287,40 @@ class MultiTurnStrategy:
 
         # Route a synthetic failure result so the accuracy collector and event
         # logger see the timed-out turn.
+        timeout_result = QueryResult(
+            id=query_id,
+            error=ErrorData(
+                error_type="TurnTimeout",
+                error_message=f"turn timeout after {self._turn_timeout_s}s",
+            ),
+        )
+
+        # Publish ERROR + COMPLETE so the metrics aggregator and event logger
+        # see the timeout (matches BenchmarkSession._handle_response ordering).
+        if self._session_publisher is not None:
+            try:
+                self._session_publisher.publish(
+                    EventRecord(
+                        event_type=ErrorEventType.GENERIC,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=timeout_result.error,
+                    )
+                )
+                self._session_publisher.publish(
+                    EventRecord(
+                        event_type=SampleEventType.COMPLETE,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=None,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to publish timeout EventRecords (query=%s)", query_id
+                )
+
         if self._session_on_sample_complete is not None:
-            timeout_result = QueryResult(
-                id=query_id,
-                error=ErrorData(
-                    error_type="TurnTimeout",
-                    error_message=f"turn timeout after {self._turn_timeout_s}s",
-                ),
-            )
             try:
                 self._session_on_sample_complete(timeout_result)
             except Exception:
@@ -374,6 +402,27 @@ class MultiTurnStrategy:
                 conv_id,
                 result.id,
             )
+            return
+
+        # If this turn failed, abandon the rest of the conversation: replaying
+        # later turns against a corrupt history (assistant placeholder /
+        # missing tool result) is meaningless and matches the timeout path.
+        if result.error is not None:
+            it = self._active_iters.pop(conv_id, None)
+            dropped = 0
+            if it is not None:
+                for _ in it:
+                    self._conv_manager.mark_turn_failed(
+                        conv_id, store_in_history=self._store_in_history
+                    )
+                    dropped += 1
+            if dropped:
+                logger.warning(
+                    "turn error on conv=%s dropped %d remaining client turn(s)",
+                    conv_id,
+                    dropped,
+                )
+            self._fill_slot()
             return
 
         try:
