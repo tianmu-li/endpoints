@@ -594,15 +594,31 @@ class TestBenchmarkSession:
 
     @pytest.mark.asyncio
     async def test_handle_response_stamps_conversation_id_and_turn(self):
-        """Both COMPLETE and ERROR events inherit the (conv_id, turn) seeded at
-        issue time; the entry is popped so late duplicates can't reuse it."""
+        """All event types inherit (conv_id, turn) seeded at issue time; streaming
+        events use .get() so the entry survives for the terminal QueryResult pop."""
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         publisher = FakePublisher()
         session = BenchmarkSession(issuer, publisher, loop)
 
-        phase_issuer = PhaseIssuer(FakeDataset(2), issuer, publisher, lambda: False)
+        phase_issuer = PhaseIssuer(FakeDataset(3), issuer, publisher, lambda: False)
         session._current_phase_issuer = phase_issuer
+
+        # Streaming path: entry stays available for the terminal COMPLETE pop.
+        phase_issuer.uuid_to_conv_info["q-stream"] = ("conv-s", 7)
+        session._handle_response(
+            StreamChunk(id="q-stream", metadata={"first_chunk": True})
+        )
+        session._handle_response(StreamChunk(id="q-stream", response_chunk="delta"))
+        assert (
+            publisher.events_of_type(SampleEventType.RECV_FIRST)[0].conversation_id,
+            publisher.events_of_type(SampleEventType.RECV_FIRST)[0].turn,
+        ) == ("conv-s", 7)
+        assert (
+            publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].conversation_id,
+            publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].turn,
+        ) == ("conv-s", 7)
+        assert "q-stream" in phase_issuer.uuid_to_conv_info
 
         # Success path: COMPLETE inherits conv info, entry is popped.
         phase_issuer.uuid_to_index["q-ok"] = 0

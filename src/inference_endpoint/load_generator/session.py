@@ -524,11 +524,18 @@ class BenchmarkSession:
                 if is_first
                 else SampleEventType.RECV_NON_FIRST
             )
+            conv_id_str, turn_num = ("", None)
+            if phase_issuer is not None:
+                conv_id_str, turn_num = phase_issuer.uuid_to_conv_info.get(
+                    resp.id, ("", None)
+                )
             self._publisher.publish(
                 EventRecord(
                     event_type=event_type,
                     timestamp_ns=time.monotonic_ns(),
                     sample_uuid=resp.id,
+                    conversation_id=conv_id_str,
+                    turn=turn_num,
                 )
             )
 
