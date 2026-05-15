@@ -276,6 +276,8 @@ class MultiTurnStrategy:
             and query_id in self._phase_issuer.uuid_to_index  # type: ignore[attr-defined]
         ):
             self._phase_issuer.inflight -= 1  # type: ignore[attr-defined]
+            if hasattr(self._phase_issuer, "completed_uuids"):
+                self._phase_issuer.completed_uuids.add(query_id)  # type: ignore[attr-defined]
 
         logger.warning(
             "Turn timed out for conversation %s (query=%s)", conv_id, query_id

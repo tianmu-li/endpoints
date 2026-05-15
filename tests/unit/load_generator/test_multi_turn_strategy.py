@@ -39,6 +39,7 @@ class FakePhaseIssuer:
         self.issued_count = 0
         self.inflight: int = 0
         self.uuid_to_index: dict[str, int] = {}
+        self.completed_uuids: set[str] = set()
 
     def issue(self, sample_index: int, data_override: dict | None = None) -> str | None:
         if self._stop_after is not None and self._count >= self._stop_after:
@@ -600,13 +601,19 @@ async def test_timeout_publishes_error_and_complete_events():
     strategy._inflight["q-x"] = "conv-x"
     strategy._active_iters["conv-x"] = iter([])
 
+    issuer = FakePhaseIssuer()
+    issuer.uuid_to_index["q-x"] = 0
+    issuer.inflight = 1
+
     strategy._all_done = asyncio.Event()
     strategy._loop = asyncio.get_running_loop()
-    strategy._phase_issuer = None
+    strategy._phase_issuer = issuer
 
     strategy._handle_timeout("q-x", "conv-x")
 
     assert publisher.publish.call_count == 2
+    assert issuer.inflight == 0
+    assert "q-x" in issuer.completed_uuids
     first_call, second_call = publisher.publish.call_args_list
     first_record = first_call.args[0]
     second_record = second_call.args[0]

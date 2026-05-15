@@ -965,3 +965,34 @@ class TestExtractPromptText:
         assert result is not None
         assert "What's the weather?" in result
         assert "get_weather" in result
+
+
+@pytest.mark.unit
+class TestBenchmarkSessionHandleResponse:
+    """Direct invocation of BenchmarkSession._handle_response (no session.run)."""
+
+    @pytest.mark.asyncio
+    async def test_drops_late_response_after_timeout(self):
+        """A late QueryResult for a query already in completed_uuids must be a no-op:
+        no duplicate ERROR/COMPLETE publish and no second inflight decrement."""
+        loop = asyncio.get_running_loop()
+        dataset = FakeDataset(1)
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+
+        phase_issuer.uuid_to_index["q-late"] = 0
+        phase_issuer.completed_uuids.add("q-late")
+        phase_issuer.inflight = 1
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        session._current_phase_issuer = phase_issuer
+
+        late_resp = QueryResult(
+            id="q-late",
+            error=ErrorData(error_type="late", error_message="late arrival"),
+        )
+        session._handle_response(late_resp)
+
+        assert publisher.events == []
+        assert phase_issuer.inflight == 1

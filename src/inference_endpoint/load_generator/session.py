@@ -178,6 +178,7 @@ class PhaseIssuer:
         "_publisher",
         "_stop_check",
         "uuid_to_index",
+        "completed_uuids",
         "inflight",
         "issued_count",
     )
@@ -194,6 +195,7 @@ class PhaseIssuer:
         self._publisher = publisher
         self._stop_check = stop_check
         self.uuid_to_index: dict[str, int] = {}
+        self.completed_uuids: set[str] = set()
         self.inflight: int = 0
         self.issued_count: int = 0
 
@@ -447,6 +449,14 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
+            # Drop late responses for queries already terminated (e.g. by
+            # MultiTurnStrategy._handle_timeout). Without this gate, a real
+            # response arriving after timeout double-publishes ERROR/COMPLETE
+            # and double-decrements inflight (no per-request HTTP timeout
+            # exists in endpoint_client; late arrivals are possible).
+            if phase_issuer is not None and query_id in phase_issuer.completed_uuids:
+                return
+
             # Emit ERROR before COMPLETE for failed queries so downstream
             # consumers (notably the metrics aggregator) see the ERROR
             # while the in-flight tracked row still exists. COMPLETE
@@ -479,6 +489,7 @@ class BenchmarkSession:
                 )
             )
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
+                phase_issuer.completed_uuids.add(query_id)
                 phase_issuer.inflight -= 1
                 if phase_issuer.inflight <= 0:
                     self._drain_event.set()
