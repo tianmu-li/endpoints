@@ -40,7 +40,7 @@ class APIType(str, Enum):
     VIDEOGEN = "videogen"
 
     def default_route(self) -> str:
-        """Return the default HTTP path for this API type."""
+        """Return the default relative URL path for this API type."""
         match self:
             case APIType.OPENAI:
                 return "v1/chat/completions"
