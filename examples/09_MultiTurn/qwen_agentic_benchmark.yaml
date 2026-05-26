@@ -1,36 +1,39 @@
-name: "agentic-coding-benchmark"
+name: "qwen-agentic-benchmark"
 version: "1.0"
 type: "online"
 
 model_params:
-  name: "Qwen/Qwen3.6-35B-A3B" # Replace with your actual model name
+  name: "Qwen/Qwen3.6-35B-A3B"
   temperature: 1.0
   top_k: 20
   top_p: 0.95
   repetition_penalty: 1.0
-  max_new_tokens: 32768
+  presence_penalty: 1.5
+  max_new_tokens: 32768 # placeholder. To be reduced after full run
+  chat_template_kwargs:
+    preserve_thinking: true
 
 datasets:
   - name: agentic_coding
     type: performance
     # Run: python scripts/convert_agentic_snapshot.py <input.jsonl> examples/09_MultiTurn/datasets/agentic_coding_flat.jsonl --verify
     # The datasets/ directory is a placeholder; populate it with the conversion script above.
-    path: /home/tianmuli/vllm_test/datasets/agentic_coding_v3.jsonl
+    path: /home/tianmuli/vllm_test/datasets/agentic_coding_v2_subset_10.jsonl
     multi_turn:
-      turn_timeout_s: 7200.0
+      turn_timeout_s: 3600.0
 
 settings:
   runtime:
     min_duration_ms: 0
-    max_duration_ms: 360000000
+    max_duration_ms: 36000000
 
   load_pattern:
     type: multi_turn
-    target_concurrency: 128
+    target_concurrency: 32
 
 endpoint_config:
   endpoints:
     - "http://localhost:30000"
   api_type: openai
 
-report_dir: logs/agentic_coding_v3
+report_dir: logs/agentic_coding_preserve
