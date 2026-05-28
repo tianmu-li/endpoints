@@ -141,6 +141,24 @@ def test_chat_message_from_dict_all_fields():
 
 
 @pytest.mark.unit
+def test_chat_message_from_dict_reasoning_content_mirrors_to_reasoning():
+    """reasoning_content is forwarded to both reasoning_content and reasoning fields."""
+    msg = _chat_message_from_dict(
+        {"role": "assistant", "content": "hi", "reasoning_content": "think"}
+    )
+    assert msg.reasoning_content == "think"
+    assert msg.reasoning == "think"
+
+
+@pytest.mark.unit
+def test_chat_message_from_dict_no_reasoning_when_absent():
+    """Neither reasoning field is set when reasoning_content is absent."""
+    msg = _chat_message_from_dict({"role": "user", "content": "hi"})
+    assert msg.reasoning_content is None
+    assert msg.reasoning is None
+
+
+@pytest.mark.unit
 def test_chat_message_content_optional():
     """ChatMessage accepts content=None for tool-dispatching assistant turns."""
     msg = ChatMessage(role="assistant", tool_calls=[])

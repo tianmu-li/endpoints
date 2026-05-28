@@ -100,7 +100,8 @@ class ChatMessage(
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
-    reasoning_content: str | None = None
+    reasoning_content: str | None = None  # DeepSeek / SGLang / vLLM non-streaming
+    reasoning: str | None = None  # vLLM field name (mirrors reasoning_content)
 
 
 # gc=False: audit 2026-05: request containers set at construction; frozen=True blocks field reassignment.

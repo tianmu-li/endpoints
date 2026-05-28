@@ -56,6 +56,7 @@ def _chat_message_from_dict(msg: dict) -> "ChatMessage":
         tool_calls=msg.get("tool_calls"),
         tool_call_id=msg.get("tool_call_id"),
         reasoning_content=msg.get("reasoning_content"),
+        reasoning=msg.get("reasoning_content"),
     )
 
 
