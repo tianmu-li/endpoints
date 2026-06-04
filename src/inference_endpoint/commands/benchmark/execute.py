@@ -342,7 +342,7 @@ def _precompute_isl_for_multi_turn(
         return
 
     thread_local = threading.local()
-    first_failure_logged = threading.Event()
+    first_failure_lock = threading.Lock()
 
     def _get_tokenizer() -> Any:
         if getattr(thread_local, "tokenizer", None) is None:
@@ -374,14 +374,13 @@ def _precompute_isl_for_multi_turn(
             token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
             return token_ids
         except Exception:
-            if not first_failure_logged.is_set():
-                first_failure_logged.set()
+            if first_failure_lock.acquire(blocking=False):
                 logger.exception(
                     "ISL pre-computation: apply_chat_template failed (first failure shown)"
                 )
             return None
 
-    n_workers = os.cpu_count() or 4
+    n_workers = min(os.cpu_count() or 4, 16)
     skipped = 0
     with ThreadPoolExecutor(
         max_workers=n_workers, thread_name_prefix="ISLPrecompute"
