@@ -401,10 +401,17 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Tokenizer check (light API call, no download)
     model_name = config.model_params.name
-    tokenizer_source = config.model_params.tokenizer_name or model_name
-    tokenizer_name = (
-        tokenizer_source if _check_tokenizer_exists(tokenizer_source) else None
-    )
+    tokenizer_override = config.model_params.tokenizer_name
+    tokenizer_name: str | None
+    if tokenizer_override:
+        if not _check_tokenizer_exists(tokenizer_override):
+            raise SetupError(
+                f"Tokenizer override '{tokenizer_override}' not found. "
+                "Provide a valid HF repo ID or local path, or remove the override to use the model name."
+            )
+        tokenizer_name = tokenizer_override
+    else:
+        tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
 
     # Streaming
     logger.info(

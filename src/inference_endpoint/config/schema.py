@@ -206,7 +206,7 @@ class ModelParams(BaseModel):
     ] = StreamingMode.AUTO
     tokenizer_name: str | None = Field(
         None,
-        description="HuggingFace tokenizer repo ID. Overrides model name for tokenizer loading.",
+        description="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
     )
 
 
