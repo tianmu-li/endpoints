@@ -213,8 +213,10 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             metadata["finish_reason"] = choice.finish_reason
         if choice.message.tool_calls:
             metadata["tool_calls"] = choice.message.tool_calls
-        if choice.message.reasoning_content:
-            metadata["reasoning_content"] = choice.message.reasoning_content
+
+        reasoning = choice.message.reasoning_content or choice.message.reasoning
+        if reasoning:
+            metadata["reasoning_content"] = reasoning
 
         tool_calls_tuple = (
             tuple(choice.message.tool_calls) if choice.message.tool_calls else None
@@ -223,7 +225,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             id=result_id or response.id,
             response_output=TextModelOutput(
                 output=choice.message.content or "",
-                reasoning=choice.message.reasoning_content,
+                reasoning=reasoning,
                 tool_calls=tool_calls_tuple,
             ),
             metadata=metadata,
