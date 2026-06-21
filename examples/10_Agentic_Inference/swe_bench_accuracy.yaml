@@ -12,11 +12,7 @@ model_params:
     preserve_thinking: true
 
 datasets:
-  # Minimal performance dataset required by the framework. Replace with any
-  # dataset representative of your workload — or a multi-turn dataset if you
-  # want to measure multi-turn throughput alongside SWE-bench accuracy.
-  # swe_bench cannot be used here: problem statements sent without an agent
-  # framework do not reflect real SWE-bench usage.
+  # Minimal performance dataset required by the framework.
   - name: swe_bench_perf
     type: "performance"
     path: "tests/assets/datasets/dummy_1k.jsonl"
@@ -31,12 +27,12 @@ datasets:
       eval_method: "swe_bench_scorer"
       num_repeats: 1
       extras:
-        num_instances: 10
+        num_instances: 200
 
 settings:
   load_pattern:
     type: "concurrency"
-    target_concurrency: 200
+    target_concurrency: 10 # mini-extra inherit target_concurrency from performance dataset
   runtime:
     n_samples_to_issue: 10
 
@@ -44,5 +40,3 @@ endpoint_config:
   endpoints:
     - "http://localhost:30000"
   api_type: "openai"
-
-report_dir: logs/swe_standalone_1

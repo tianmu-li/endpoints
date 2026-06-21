@@ -1782,7 +1782,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     REQUIRES_EXTRACTOR: ClassVar[bool] = False
     SKIP_ENDPOINT_PHASE: ClassVar[bool] = True
-    DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 8 * 60 * 60
+    DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 24 * 60 * 60
 
     def __init__(
         self,
