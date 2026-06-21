@@ -1742,6 +1742,9 @@ def _read_swebench_exit_statuses(
         data = yaml.safe_load(files[-1].read_text()) or {}
         return data.get("instances_by_exit_status", {})
     except Exception:
+        logger.debug(
+            "Could not read %s for progress reporting", files[-1], exc_info=True
+        )
         return {}
 
 
@@ -1836,8 +1839,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"Pass swebench_config_template= in accuracy_config.extras."
             )
         with self.swebench_config_template.open() as _f:
-            _tmpl = yaml.safe_load(_f)
-        if not isinstance((_tmpl or {}).get("model", {}).get("model_kwargs"), dict):
+            _tmpl = yaml.safe_load(_f) or {}
+        model_cfg = _tmpl.get("model")
+        if not isinstance(model_cfg, dict) or not isinstance(
+            model_cfg.get("model_kwargs"), dict
+        ):
             raise ValueError(
                 f"swebench template {self.swebench_config_template} must have a "
                 "'model.model_kwargs' dict; check the template structure."
@@ -1918,17 +1924,21 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
             )
 
-        docker_result = subprocess.run(
-            ["docker", "version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=10,
-        )
-        if docker_result.returncode != 0:
-            raise SetupError(
-                "Docker daemon is not running or docker is not on PATH. "
-                "Start Docker and retry."
+        if shutil.which("docker") is None:
+            raise SetupError("docker is not on PATH. Install Docker and retry.")
+
+        try:
+            docker_result = subprocess.run(
+                ["docker", "version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=10,
             )
+        except Exception as e:
+            raise SetupError(f"Failed to execute docker command: {e}") from e
+
+        if docker_result.returncode != 0:
+            raise SetupError("Docker daemon is not running. Start Docker and retry.")
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -1940,10 +1950,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         with self.swebench_config_template.open() as f:
             cfg = yaml.safe_load(f)
 
-        model_params = benchmark_config_dict.get("model_params", {})
-        endpoints = benchmark_config_dict.get("endpoint_config", {}).get(
-            "endpoints", []
-        )
+        model_params = benchmark_config_dict.get("model_params") or {}
+        endpoint_cfg = benchmark_config_dict.get("endpoint_config") or {}
+        endpoints = endpoint_cfg.get("endpoints", [])
 
         model_name = model_params.get("name")
         if not model_name:
@@ -1959,7 +1968,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         else:
             cfg["model"]["model_kwargs"]["api_base"] = ""
 
-        api_key = benchmark_config_dict.get("endpoint_config", {}).get("api_key")
+        api_key = endpoint_cfg.get("api_key")
         if api_key:
             cfg["model"]["model_kwargs"]["api_key"] = api_key
 
@@ -2128,8 +2137,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         shutil.copy2(result_path, self.report_dir / "swe_bench_results.json")
 
         result = msgspec.json.decode(result_path.read_bytes(), type=dict)
-        submitted = result.get("submitted_instances", 0)
-        resolved = result.get("resolved_instances", 0)
+        submitted = result.get("submitted_instances") or 0
+        resolved = result.get("resolved_instances") or 0
         if submitted == 0:
             logger.warning("SWE-bench: submitted_instances=0; returning None score")
             return None, 1

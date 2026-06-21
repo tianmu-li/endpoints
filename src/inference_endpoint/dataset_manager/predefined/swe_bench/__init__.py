@@ -39,10 +39,10 @@ class SWEBench(
     runs mini-swe-agent against a live endpoint and grades patches with the
     SWE-bench evaluation harness.
 
-    The ``prompt`` column (mapped from HF's ``problem_statement``) is sent to
-    the endpoint during the accuracy phase; responses are discarded by the
-    scorer. The ``instance_id`` column identifies which instances mini-swe-agent
-    will evaluate.
+    The ``instance_id`` column identifies which instances mini-swe-agent will
+    evaluate. The endpoint phase is skipped entirely for this scorer
+    (``SKIP_ENDPOINT_PHASE=True``); ``SWEBenchScorer`` drives the agent
+    subprocess directly against the configured endpoint.
 
     Using this dataset as a performance dataset (type: performance) is not
     meaningful — problem statements sent directly to the model without an
