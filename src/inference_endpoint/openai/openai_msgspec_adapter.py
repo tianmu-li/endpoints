@@ -214,6 +214,9 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         if choice.message.tool_calls:
             metadata["tool_calls"] = choice.message.tool_calls
 
+        assert not (
+            choice.message.reasoning_content and choice.message.reasoning
+        ), "Response contains both 'reasoning_content' and 'reasoning'; expected exactly one"
         reasoning = choice.message.reasoning_content or choice.message.reasoning
         if reasoning:
             metadata["reasoning_content"] = reasoning

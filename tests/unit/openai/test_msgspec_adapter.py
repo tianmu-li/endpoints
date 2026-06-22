@@ -28,7 +28,14 @@ from inference_endpoint.openai.openai_msgspec_adapter import (
 from inference_endpoint.openai.types import ChatMessage
 
 
-def _make_reasoning_response(field_name: str, value: str) -> bytes:
+def _make_reasoning_response(
+    field_name: str,
+    value: str,
+    extra_message_fields: dict | None = None,
+) -> bytes:
+    message: dict = {"role": "assistant", "content": "answer", field_name: value}
+    if extra_message_fields:
+        message.update(extra_message_fields)
     return json.dumps(
         {
             "id": "chatcmpl-test",
@@ -38,11 +45,7 @@ def _make_reasoning_response(field_name: str, value: str) -> bytes:
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "answer",
-                        field_name: value,
-                    },
+                    "message": message,
                     "finish_reason": "stop",
                 }
             ],
@@ -226,6 +229,18 @@ def test_from_endpoint_response_reasoning_field(field_name: str):
     assert isinstance(result.response_output, TextModelOutput)
     assert result.response_output.reasoning == "thinking..."
     assert result.metadata.get("reasoning_content") == "thinking..."
+
+
+@pytest.mark.unit
+def test_from_endpoint_response_reasoning_both_fields_raises():
+    """Both reasoning fields populated simultaneously triggers an assertion error."""
+    response = _make_reasoning_response(
+        "reasoning_content",
+        "thinking via sglang",
+        extra_message_fields={"reasoning": "thinking via vllm"},
+    )
+    with pytest.raises(AssertionError):
+        OpenAIMsgspecAdapter.decode_response(response, "q1")
 
 
 @pytest.mark.unit
