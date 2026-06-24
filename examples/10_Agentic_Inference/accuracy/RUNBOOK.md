@@ -41,9 +41,9 @@ uv run inference-endpoint benchmark from-config \
   --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml
 ```
 
-Scorer preflight now resolves the requested SWE-bench instances and pre-pulls any
-missing Docker images before `mini-extra swebench` starts. Cached images are
-skipped.
+Scorer preflight now resolves the requested SWE-bench instances and pre-pulls
+the required Docker images before `mini-extra swebench` starts, using a compact
+progress bar. Cached images complete immediately in that bar.
 
 ## Common failure modes
 

@@ -119,6 +119,31 @@ def _make_staged_run(on_eval_cmd):
     return fake_run
 
 
+class _FakeTqdm:
+    instances: list["_FakeTqdm"] = []
+
+    def __init__(self, *, total: int, desc: str, unit: str):
+        self.total = total
+        self.desc = desc
+        self.unit = unit
+        self.updates: list[int] = []
+        self.closed = False
+        type(self).instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+
+    def update(self, n: int) -> None:
+        self.updates.append(n)
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances = []
+
+
 @pytest.fixture
 def patch_subprocess(monkeypatch, report_dir: Path, swe_bench_project: Path):
     """Patch subprocess.run to write fake preds.json and result JSON."""
@@ -585,6 +610,8 @@ class TestSWEBenchScorerPreflight:
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
+        _FakeTqdm.reset()
+        monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
         captured: list[list[str]] = []
 
         def fake_run(cmd, **kw):
@@ -596,10 +623,22 @@ class TestSWEBenchScorerPreflight:
                     stdout=(
                         "👋 This is mini-swe-agent version 2.3.0.\n"
                         "minisweagent: INFO: Instance slice: 500 -> 2 instances\n"
-                        + json.dumps(["docker.io/swebench/test:latest"])
+                        + json.dumps(
+                            [
+                                "docker.io/swebench/cached:latest",
+                                "docker.io/swebench/missing:latest",
+                            ]
+                        )
                     ),
                     stderr="",
                 )
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                image = cmd[3]
+                if image == "docker.io/swebench/cached:latest":
+                    return MagicMock(returncode=0, stdout="", stderr=b"")
+                return MagicMock(returncode=1, stdout="", stderr=b"missing")
+            if cmd[:2] == ["docker", "pull"]:
+                return MagicMock(returncode=0, stdout="", stderr=b"")
             return MagicMock(returncode=0, stdout="", stderr=b"")
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
@@ -617,7 +656,50 @@ class TestSWEBenchScorerPreflight:
         )
         compile(derive_cmd[6], "<swebench-derive-images>", "exec")
         assert derive_cmd[-3:] == ["lite", "test", "2"]
-        assert ["docker", "pull", "docker.io/swebench/test:latest"] not in captured
+        assert ["docker", "pull", "docker.io/swebench/cached:latest"] not in captured
+        assert ["docker", "pull", "docker.io/swebench/missing:latest"] in captured
+        assert len(_FakeTqdm.instances) == 1
+        assert _FakeTqdm.instances[0].total == 2
+        assert _FakeTqdm.instances[0].desc == "SWE-bench images"
+        assert _FakeTqdm.instances[0].updates == [1, 1]
+        assert _FakeTqdm.instances[0].closed is True
+
+    def test_preflight_all_cached_still_completes_progress_bar(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+        _FakeTqdm.reset()
+        monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            captured.append(list(cmd))
+            cmd_str = " ".join(cmd)
+            if "get_swebench_docker_image_name" in cmd_str:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps(
+                        [
+                            "docker.io/swebench/cached-a:latest",
+                            "docker.io/swebench/cached-b:latest",
+                        ]
+                    ),
+                    stderr="",
+                )
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                return MagicMock(returncode=0, stdout="", stderr=b"")
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+        assert not any(cmd[:2] == ["docker", "pull"] for cmd in captured)
+        assert len(_FakeTqdm.instances) == 1
+        assert _FakeTqdm.instances[0].total == 2
+        assert _FakeTqdm.instances[0].updates == [1, 1]
+        assert _FakeTqdm.instances[0].closed is True
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -677,16 +759,25 @@ class TestSWEBenchScorerPreflight:
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
+        _FakeTqdm.reset()
+        monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
 
         def fake_run(cmd, **kw):
             cmd_str = " ".join(cmd)
             if "get_swebench_docker_image_name" in cmd_str:
                 return MagicMock(
                     returncode=0,
-                    stdout=json.dumps(["docker.io/swebench/test:latest"]),
+                    stdout=json.dumps(
+                        [
+                            "docker.io/swebench/cached:latest",
+                            "docker.io/swebench/test:latest",
+                        ]
+                    ),
                     stderr="",
                 )
             if cmd[:3] == ["docker", "image", "inspect"]:
+                if cmd[3] == "docker.io/swebench/cached:latest":
+                    return MagicMock(returncode=0, stdout="", stderr=b"")
                 return MagicMock(returncode=1, stdout="", stderr=b"missing")
             if cmd[:2] == ["docker", "pull"]:
                 return MagicMock(
@@ -702,3 +793,7 @@ class TestSWEBenchScorerPreflight:
             match=r"docker\.io/swebench/test:latest.*rate limit exceeded",
         ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
+        assert len(_FakeTqdm.instances) == 1
+        assert _FakeTqdm.instances[0].total == 2
+        assert _FakeTqdm.instances[0].updates == [1]
+        assert _FakeTqdm.instances[0].closed is True

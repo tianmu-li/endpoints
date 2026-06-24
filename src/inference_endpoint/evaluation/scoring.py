@@ -1974,32 +1974,36 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @classmethod
     def _prepull_images(cls, images: list[str]) -> None:
-        for image in images:
-            inspect_result = subprocess.run(
-                ["docker", "image", "inspect", image],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=30,
-            )
-            if inspect_result.returncode == 0:
-                logger.info("SWE-bench Docker image already cached: %s", image)
-                continue
+        if not images:
+            return
 
-            logger.info("Pulling SWE-bench Docker image: %s", image)
-            pull_result = subprocess.run(
-                ["docker", "pull", image],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=cls.PREPULL_TIMEOUT_S,
-            )
-            if pull_result.returncode != 0:
-                stderr_text = _decode_subprocess_stderr(pull_result.stderr)
-                raise SetupError(
-                    "Failed to pre-pull required SWE-bench Docker image "
-                    f"{image}. Authenticate to Docker Hub with `docker login` "
-                    "or use a pre-seeded image cache/mirror before retrying."
-                    + (f" stderr: {stderr_text}" if stderr_text else "")
+        with tqdm(total=len(images), desc="SWE-bench images", unit="image") as bar:
+            for image in images:
+                inspect_result = subprocess.run(
+                    ["docker", "image", "inspect", image],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
                 )
+                if inspect_result.returncode == 0:
+                    bar.update(1)
+                    continue
+
+                pull_result = subprocess.run(
+                    ["docker", "pull", image],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=cls.PREPULL_TIMEOUT_S,
+                )
+                if pull_result.returncode != 0:
+                    stderr_text = _decode_subprocess_stderr(pull_result.stderr)
+                    raise SetupError(
+                        "Failed to pre-pull required SWE-bench Docker image "
+                        f"{image}. Authenticate to Docker Hub with `docker login` "
+                        "or use a pre-seeded image cache/mirror before retrying."
+                        + (f" stderr: {stderr_text}" if stderr_text else "")
+                    )
+                bar.update(1)
 
     @classmethod
     def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
