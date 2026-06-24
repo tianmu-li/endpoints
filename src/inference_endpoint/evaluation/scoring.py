@@ -184,10 +184,17 @@ class Scorer(ABC):
                     )
         return pd.DataFrame(outputs)
 
+    @property
+    def _sample_index(self) -> dict:
+        assert self.sample_index_map is not None, (
+            f"{self.__class__.__name__}.SKIP_ENDPOINT_PHASE is True but score() was not "
+            "overridden; override score() to implement external evaluation."
+        )
+        return self.sample_index_map
+
     def match_sample_index(self, row: pd.Series) -> pd.Series:
         # Pandas Apply function to create a new 'sample_index' column
-        assert self.sample_index_map is not None
-        row["sample_index"] = self.sample_index_map[row["sample_uuid"]]
+        row["sample_index"] = self._sample_index[row["sample_uuid"]]
         return row
 
     @abstractmethod
@@ -201,14 +208,10 @@ class Scorer(ABC):
             tuple[float | None, int]: The mean score and the number of repeats.
                 Returns None as the score if evaluation fails.
         """
-        assert self.sample_index_map is not None, (
-            f"{self.__class__.__name__}.SKIP_ENDPOINT_PHASE is True but score() was not "
-            "overridden; override score() to implement external evaluation."
-        )
         df = self.get_outputs()
 
         # Outputs are for all samples, not just the target dataset
-        valid_uuids = self.sample_index_map.keys()
+        valid_uuids = self._sample_index.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
 
         # Match to sample index from dataset
@@ -221,12 +224,12 @@ class Scorer(ABC):
 
         # Get ground truths
         order = df["sample_index"].to_numpy()
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
-        assert self.ground_truth_column in self.dataset.dataframe.columns, (
-            f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
         ground_truths = self.dataset.dataframe[self.ground_truth_column].to_numpy()[
             order
         ]
@@ -301,8 +304,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         df = self.get_outputs()
 
         # Outputs are for all samples, not just the target dataset
-        assert self.sample_index_map is not None
-        valid_uuids = self.sample_index_map.keys()
+        valid_uuids = self._sample_index.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
 
         # Match to sample index from dataset
@@ -311,12 +313,12 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
-        assert self.ground_truth_column in self.dataset.dataframe.columns, (
-            f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
 
         ground_truths = list(
             self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -501,9 +503,9 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
             raise TypeError(
                 "AgenticInferenceInlineScorer requires an AgenticInferenceDataset"
             )
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
 
         expected = self._expected_assistant_turns()
         scorable_expected: dict[tuple[str, int], dict[str, Any]] = {}
@@ -636,9 +638,9 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
             Rows ``conv1/user/turn=1`` followed by ``conv1/assistant/turn=2``
             produce ``expected[("conv1", 1)]`` with ``"_assistant_turn": 2``.
         """
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
 
         rows_by_conversation: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for raw_row in self.dataset.dataframe.to_dict("records"):
@@ -886,9 +888,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
-        assert ground_truth_column is None, (
-            "ground_truth_column should be None for LiveCodeBenchScorer"
-        )
+        assert (
+            ground_truth_column is None
+        ), "ground_truth_column should be None for LiveCodeBenchScorer"
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,
@@ -1128,17 +1130,16 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         df = self.get_outputs()
 
         # Outputs are for all samples, not just the target dataset
-        assert self.sample_index_map is not None
-        valid_uuids = self.sample_index_map.keys()
+        valid_uuids = self._sample_index.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
 
         # Match to sample index from dataset
         df = df.apply(self.match_sample_index, axis=1)
 
         # Get question IDs
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
 
         def get_question_id(sample_index: int) -> str:
             assert self.dataset.dataframe is not None
@@ -1349,20 +1350,19 @@ class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
     def score(self) -> tuple[float, int]:
         df = self.get_outputs()
 
-        assert self.sample_index_map is not None
-        valid_uuids = self.sample_index_map.keys()
+        valid_uuids = self._sample_index.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
         df = df.apply(self.match_sample_index, axis=1)
 
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
-        assert self.ground_truth_column in self.dataset.dataframe.columns, (
-            f"Ground truth column {self.ground_truth_column} not found in dataset"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset"
 
         ground_truths = list(
             self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -1614,8 +1614,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
 
     def score(self) -> tuple[float | None, int]:
         df = self.get_outputs()
-        assert self.sample_index_map is not None
-        valid_uuids = self.sample_index_map.keys()
+        valid_uuids = self._sample_index.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
         # Drop failed queries: Scorer.get_outputs() emits "" when record.data
         # is None (workers set response_output=None on error). Passing "" to
@@ -1645,12 +1644,12 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
 
         video_paths: list[str] = df["output"].tolist()
         order = df["sample_index"].to_numpy().astype(int)
-        assert self.dataset.dataframe is not None, (
-            f"Dataset {self.dataset} has no dataframe loaded"
-        )
-        assert self.ground_truth_column in self.dataset.dataframe.columns, (
-            f"Prompt column {self.ground_truth_column} not found in dataset"
-        )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Prompt column {self.ground_truth_column} not found in dataset"
         prompts: list[str] = [
             str(p)
             for p in self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -1827,11 +1826,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         ground_truth_column: str | None = "instance_id",
         swe_bench_project_path: str | os.PathLike | None = None,
         swebench_config_template: str | os.PathLike | None = None,
-        subset: str = DEFAULT_SUBSET,
-        split: str = DEFAULT_SPLIT,
-        num_instances: int = DEFAULT_NUM_INSTANCES,
-        workers: int = DEFAULT_WORKERS,
-        max_eval_workers: int = DEFAULT_MAX_EVAL_WORKERS,
+        subset: str = "verified",
+        split: str = "test",
+        num_instances: int = 100,
+        workers: int = 10,
+        max_eval_workers: int = 10,
         subprocess_timeout_s: int | None = None,
     ):
         super().__init__(
