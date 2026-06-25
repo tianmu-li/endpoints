@@ -395,7 +395,20 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
 
     # Setup runtime settings using factory method
-    rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+    agentic_overrides: dict = {}
+    if isinstance(dataloader, AgenticInferenceDataset):
+        perf_cfgs = [d for d in config.datasets if d.type == DatasetType.PERFORMANCE]
+        agentic_cfg = perf_cfgs[0].agentic_inference if perf_cfgs else None
+        assert dataloader.conversation_metadata is not None
+        agentic_overrides = {
+            "agentic_num_conversations": dataloader.conversation_metadata.num_conversations,
+            "agentic_num_trajectories": agentic_cfg.num_trajectories_to_issue
+            if agentic_cfg is not None
+            else None,
+        }
+    rt_settings = RuntimeSettings.from_config(
+        config, dataloader.num_samples(), **agentic_overrides
+    )
 
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()

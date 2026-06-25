@@ -21,8 +21,6 @@ datasets:
       eval_method: agentic_inference_inline # required benchmark default.
     agentic_inference:
       turn_timeout_s: 14400.0
-      enable_salt: true # do not change.
-      inject_tool_delay: true # do not change.
       num_trajectories_to_issue: 1
 
   - name: "aime25::gptoss"
@@ -55,7 +53,7 @@ settings:
 
   load_pattern:
     type: agentic_inference
-    target_concurrency: 8 # Submission-specific concurrency.
+    target_concurrency: 128 # Submission-specific concurrency.
 
 endpoint_config:
   endpoints:
