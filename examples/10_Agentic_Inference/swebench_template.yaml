@@ -16,6 +16,7 @@ agent:
     You'll be helping implement necessary changes to meet requirements in the PR description.
     Your task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.
     <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>
+    You MUST keep iterating until the problem is fully solved. Do NOT end your session without submitting a working patch. The problem CAN DEFINITELY be solved — if you are stuck, re-read the PR description and try a different approach.
 
     For each response:
 
@@ -29,11 +30,14 @@ agent:
 
     ## Recommended Workflow
 
-    1. Analyze the codebase by finding and reading relevant files
-    2. Create a script to reproduce the issue
-    3. Edit the source code to resolve the issue
-    4. Verify your fix works by running your script again
-    5. Test edge cases to ensure your fix is robust
+    1. Restate the issue in your own words: identify the error messages, method names, and files involved, and enumerate the exact steps to reproduce it
+    2. Analyze the codebase by finding and reading relevant files
+    3. Create a minimal script to reproduce the issue and confirm you see the failure before making any edits
+    4. State clearly what the problem is, where it is located, and exactly how you plan to fix it — before writing any code
+    5. Edit the source code to resolve the issue
+    6. Verify your fix works: run your reproduction script (must pass) and run existing tests related to the modified code (must not regress)
+    7. Test edge cases to ensure your fix is robust
+    8. Re-read the PR description, run `git diff HEAD` to review your full changeset, and confirm your changes fully address all requirements before submitting
 
     ## Command Execution Rules
 
