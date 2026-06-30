@@ -2215,10 +2215,20 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "Could not locate minisweagent install for patching: "
                 + result.stderr.strip()
             )
-        target_file = Path(result.stdout.strip())
+        # Take the last non-empty line to skip any uv progress output on first sync.
+        last_line = next(
+            (line for line in reversed(result.stdout.splitlines()) if line.strip()),
+            "",
+        )
+        target_file = Path(last_line.strip())
         # .../site-packages/minisweagent/models/utils/actions_toolcall.py
         # parents: [3]=site-packages
         site_packages = target_file.parents[3]
+        if not site_packages.is_dir():
+            raise SetupError(
+                f"Resolved site-packages path does not exist: {site_packages}. "
+                f"Raw python output: {result.stdout.strip()!r}"
+            )
 
         patch_result = subprocess.run(
             [
