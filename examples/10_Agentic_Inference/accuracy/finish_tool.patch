@@ -82,7 +82,7 @@
 
  def parse_toolcall_actions(tool_calls: list, *, format_error_template: str) -> list[dict]:
      """Parse tool calls from the response. Raises FormatError if unknown tool or invalid args."""
-@@ -41,28 +109,94 @@
+@@ -41,28 +109,99 @@
              }
          )
      actions = []
@@ -125,7 +125,12 @@
 +            if not isinstance(files, list) or not files:
 +                errors.append("finish: files_modified must be a non-empty list of file paths.")
 +                continue
-+            files_str = " ".join(shlex.quote(f"/testbed/{f.lstrip('/')}") for f in files)
++            def _to_rel(p: str) -> str:
++                p = p.lstrip("/")
++                if p.startswith("testbed/"):
++                    p = p[len("testbed/"):]
++                return p
++            files_str = " ".join(shlex.quote(f"/testbed/{_to_rel(f)}") for f in files)
 +            actions.append({
 +                "command": f"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git -C /testbed diff HEAD -- {files_str}",
 +                "tool_call_id": tool_call_id,
