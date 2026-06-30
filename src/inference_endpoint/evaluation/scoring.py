@@ -2174,11 +2174,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         if docker_result.returncode != 0:
             raise SetupError("Docker daemon is not running. Start Docker and retry.")
 
-        if shutil.which("patch") is None:
-            raise SetupError(
-                "patch is not on PATH; install it with: sudo apt-get install patch"
-            )
-
         cls._apply_tools_patch(swe_bench_project_path)
 
         images = cls._derive_required_images(
@@ -2191,9 +2186,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @staticmethod
     def _apply_tools_patch(swe_bench_project_path: Path) -> None:
-        """Apply finish_tool.patch to the minisweagent install if not already applied."""
-        patch_file = swe_bench_project_path / "finish_tool.patch"
-        if not patch_file.exists():
+        """Overwrite minisweagent source files with patched replacements."""
+        replacements = {
+            "actions_toolcall.py": "minisweagent/models/utils/actions_toolcall.py",
+            "litellm_model.py": "minisweagent/models/litellm_model.py",
+        }
+        # Skip if none of the replacement files are present.
+        if not any((swe_bench_project_path / f).exists() for f in replacements):
             return
 
         result = subprocess.run(
@@ -2212,43 +2211,29 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         )
         if result.returncode != 0:
             raise SetupError(
-                "Could not locate minisweagent install for patching: "
-                + result.stderr.strip()
+                "Could not locate minisweagent install: " + result.stderr.strip()
             )
         # Take the last non-empty line to skip any uv progress output on first sync.
         last_line = next(
             (line for line in reversed(result.stdout.splitlines()) if line.strip()),
             "",
         )
-        target_file = Path(last_line.strip())
-        # .../site-packages/minisweagent/models/utils/actions_toolcall.py
-        # parents: [3]=site-packages
-        site_packages = target_file.parents[3]
+        actions_toolcall_file = Path(last_line.strip())
+        site_packages = actions_toolcall_file.parents[3]
         if not site_packages.is_dir():
             raise SetupError(
                 f"Resolved site-packages path does not exist: {site_packages}. "
                 f"Raw python output: {result.stdout.strip()!r}"
             )
 
-        patch_args = [
-            "patch",
-            "--silent",
-            "-p1",
-            "-d",
-            str(site_packages),
-            "-i",
-            str(patch_file.resolve()),
-        ]
-        # Reverse-apply first to undo any previously applied version, then
-        # apply fresh — this handles patch upgrades without needing a clean venv.
-        subprocess.run(
-            patch_args + ["--reverse", "--force"], capture_output=True, text=True
-        )
-        patch_result = subprocess.run(patch_args, capture_output=True, text=True)
-        if patch_result.returncode != 0:
-            raise SetupError(
-                f"Failed to apply finish_tool.patch: {patch_result.stderr.strip()}"
-            )
+        for src_name, rel_dest in replacements.items():
+            src = swe_bench_project_path / src_name
+            if not src.exists():
+                continue
+            dest = site_packages / rel_dest
+            if not dest.parent.is_dir():
+                raise SetupError(f"Target directory does not exist: {dest.parent}")
+            shutil.copy2(src, dest)
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
