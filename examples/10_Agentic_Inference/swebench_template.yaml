@@ -34,7 +34,7 @@ agent:
     2. Analyze the codebase by finding and reading relevant files
     3. Create a minimal script to reproduce the issue and confirm you see the failure before making any edits
     4. State clearly what the problem is, where it is located, and exactly how you plan to fix it — before writing any code
-    5. Edit the source code to resolve the issue
+    5. Edit the source code: use `str_replace_editor` for precise edits (`str_replace` for targeted changes, `create` for new files), bash for everything else
     6. Verify your fix works: run your reproduction script (must pass) and run existing tests related to the modified code (must not regress)
     7. Test edge cases to ensure your fix is robust
     8. Re-read the PR description, run `git diff HEAD` to review your full changeset, and confirm your changes fully address all requirements before submitting
@@ -75,42 +75,30 @@ agent:
     - You can use bash commands or invoke any tool that is available in the environment
     - You can also create new tools or scripts to help you with the task
     - If a tool isn't available, you can also install it
+    - Prefer `str_replace_editor` over sed/heredocs for file edits:
+        - `view` (with optional `view_range=[start, end]`) — read a file with line numbers
+        - `str_replace` — replace an exact string that matches exactly once
+        - `create` — write an entire new file
+    - Use bash for everything else (search, run tests, install packages, etc.)
 
     ## Submission
 
-    When you've completed your work, you MUST submit your changes as a git patch.
-    Follow these steps IN ORDER, with SEPARATE commands:
+    When you've completed your work, call the `finish` tool with the list of source
+    files you modified:
 
-    Step 1: Create the patch file
-    Run `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.
-    Do NOT commit your changes.
+    finish(files_modified=["path/to/file1.py", "path/to/file2.py"])
+
+    The patch is automatically extracted from your git changes. Do NOT create
+    patch.txt or use the `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` command.
 
     <IMPORTANT>
-    The patch must only contain changes to the specific source files you modified to fix the issue.
-    Do not submit file creations or changes to any of the following files:
-
-    - test and reproduction files
-    - helper scripts, tests, or tools that you created
-    - installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)
-    - binary or compiled files
+    Only list source files you modified to fix the issue — not test files, reproduction
+    scripts, helper tools, configuration files, or binary files.
     </IMPORTANT>
 
-    Step 2: Verify your patch
-    Inspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.
-
-    Step 3: Submit (EXACT command required)
-    You MUST use this EXACT command to submit:
-
-    ```bash
-    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
-    ```
-
-    If the command fails (nonzero exit status), it will not submit.
-
     <CRITICAL>
-    - Creating/viewing the patch and submitting it MUST be separate commands (not combined with &&).
-    - If you modify patch.txt after verifying, you SHOULD verify again before submitting.
-    - You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.
+    You CANNOT continue working (reading, editing, testing) in any way on this task
+    after calling finish.
     </CRITICAL>
     </instructions>
   step_limit: 250
@@ -169,14 +157,12 @@ model:
 
     Here is general guidance on how to submit correct toolcalls:
 
-    Every response needs to use the 'bash' tool at least once to execute commands.
+    Every response MUST include at least one tool call. Available tools:
+    - bash: execute a shell command — {"command": "your_command_here"}
+    - str_replace_editor: view or edit files — {"command": "view"|"str_replace"|"create", "path": "...", ...}
+    - finish: submit your solution — {"files_modified": ["path/to/file.py", ...]}
 
-    Call the bash tool with your command as the argument:
-    - Tool: bash
-    - Arguments: {"command": "your_command_here"}
-
-    If you have completed your assignment, please consult the first message about how to
-    submit your solution (you will not be able to continue working on this task after that).
+    If you have completed your assignment, call the finish tool as described in the instructions.
   # Patched at runtime by SWEBenchScorer from model_params and endpoint_config
   model_name: ""
   model_kwargs:

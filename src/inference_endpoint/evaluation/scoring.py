@@ -2174,6 +2174,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         if docker_result.returncode != 0:
             raise SetupError("Docker daemon is not running. Start Docker and retry.")
 
+        if shutil.which("patch") is None:
+            raise SetupError(
+                "patch is not on PATH; install it with: sudo apt-get install patch"
+            )
+
+        cls._apply_tools_patch(swe_bench_project_path)
+
         images = cls._derive_required_images(
             swe_bench_project_path=swe_bench_project_path,
             subset=subset,
@@ -2181,6 +2188,57 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             num_instances=num_instances,
         )
         cls._prepull_images(images, workers=workers)
+
+    @staticmethod
+    def _apply_tools_patch(swe_bench_project_path: Path) -> None:
+        """Apply finish_tool.patch to the minisweagent install if not already applied."""
+        patch_file = swe_bench_project_path / "finish_tool.patch"
+        if not patch_file.exists():
+            return
+
+        result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--project",
+                str(swe_bench_project_path),
+                "python3",
+                "-c",
+                "import minisweagent.models.utils.actions_toolcall as m; print(m.__file__)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise SetupError(
+                "Could not locate minisweagent install for patching: "
+                + result.stderr.strip()
+            )
+        target_file = Path(result.stdout.strip())
+        # .../site-packages/minisweagent/models/utils/actions_toolcall.py
+        # parents: [3]=site-packages
+        site_packages = target_file.parents[3]
+
+        patch_result = subprocess.run(
+            [
+                "patch",
+                "--forward",
+                "--silent",
+                "-p1",
+                "-d",
+                str(site_packages),
+                "-i",
+                str(patch_file.resolve()),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        # 0 = applied cleanly, 1 = already applied (--forward skips), 2 = real error
+        if patch_result.returncode == 2:
+            raise SetupError(
+                f"Failed to apply finish_tool.patch: {patch_result.stderr.strip()}"
+            )
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
