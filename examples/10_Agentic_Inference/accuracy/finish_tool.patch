@@ -82,7 +82,7 @@
 
  def parse_toolcall_actions(tool_calls: list, *, format_error_template: str) -> list[dict]:
      """Parse tool calls from the response. Raises FormatError if unknown tool or invalid args."""
-@@ -41,28 +109,99 @@
+@@ -41,28 +109,98 @@
              }
          )
      actions = []
@@ -154,28 +154,27 @@
 +            elif command == "str_replace":
 +                old_str = args.get("old_str", "")
 +                new_str = args.get("new_str", "")
++                path_b64 = base64.b64encode(path.encode()).decode()
 +                old_b64 = base64.b64encode(old_str.encode()).decode()
 +                new_b64 = base64.b64encode(new_str.encode()).decode()
-+                path_json = json.dumps(path)
 +                bash_cmd = (
-+                    f'python3 -c "import base64,sys; '
-+                    f"path={path_json}; "
-+                    f"old=base64.b64decode({json.dumps(old_b64)}).decode(); "
-+                    f"new=base64.b64decode({json.dumps(new_b64)}).decode(); "
-+                    f"c=open(path).read(); n=c.count(old); "
-+                    f"sys.exit(f\\'Expected exactly 1 match, found {{n}}\\') if n!=1 "
-+                    f'else open(path,\\"w\\").write(c.replace(old,new,1))"'
++                    f"python3 -c 'import base64,sys;"
++                    f"path=base64.b64decode(\"{path_b64}\").decode();"
++                    f"old=base64.b64decode(\"{old_b64}\").decode();"
++                    f"new=base64.b64decode(\"{new_b64}\").decode();"
++                    f"c=open(path).read();n=c.count(old);"
++                    f"sys.exit(\"Expected exactly 1 match, found \"+str(n)) if n!=1 else open(path,\"w\").write(c.replace(old,new,1))'"
 +                )
 +                actions.append({"command": bash_cmd, "tool_call_id": tool_call_id})
 +            elif command == "create":
 +                content = args.get("new_str", "")
++                path_b64 = base64.b64encode(path.encode()).decode()
 +                content_b64 = base64.b64encode(content.encode()).decode()
-+                path_json = json.dumps(path)
 +                bash_cmd = (
-+                    f'python3 -c "import base64,os; '
-+                    f"path={path_json}; "
-+                    f"os.makedirs(os.path.dirname(path) or \\'.\\', exist_ok=True); "
-+                    f'open(path,\\"w\\").write(base64.b64decode({json.dumps(content_b64)}).decode())"'
++                    f"python3 -c 'import base64,os;"
++                    f"path=base64.b64decode(\"{path_b64}\").decode();"
++                    f"os.makedirs(os.path.dirname(path) or \".\",exist_ok=True);"
++                    f"open(path,\"w\").write(base64.b64decode(\"{content_b64}\").decode())'"
 +                )
 +                actions.append({"command": bash_cmd, "tool_call_id": tool_call_id})
 +            else:
