@@ -2230,22 +2230,22 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"Raw python output: {result.stdout.strip()!r}"
             )
 
-        patch_result = subprocess.run(
-            [
-                "patch",
-                "--forward",
-                "--silent",
-                "-p1",
-                "-d",
-                str(site_packages),
-                "-i",
-                str(patch_file.resolve()),
-            ],
-            capture_output=True,
-            text=True,
+        patch_args = [
+            "patch",
+            "--silent",
+            "-p1",
+            "-d",
+            str(site_packages),
+            "-i",
+            str(patch_file.resolve()),
+        ]
+        # Reverse-apply first to undo any previously applied version, then
+        # apply fresh — this handles patch upgrades without needing a clean venv.
+        subprocess.run(
+            patch_args + ["--reverse", "--force"], capture_output=True, text=True
         )
-        # 0 = applied cleanly, 1 = already applied (--forward skips), 2 = real error
-        if patch_result.returncode == 2:
+        patch_result = subprocess.run(patch_args, capture_output=True, text=True)
+        if patch_result.returncode != 0:
             raise SetupError(
                 f"Failed to apply finish_tool.patch: {patch_result.stderr.strip()}"
             )
