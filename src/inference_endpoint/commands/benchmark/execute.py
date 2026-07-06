@@ -76,6 +76,7 @@ from inference_endpoint.config.schema import (
     LoadPattern,
     LoadPatternType,
     ProfilerEngine,
+    ScorerMethod,
     StreamingMode,
     TestMode,
     TestType,
@@ -298,6 +299,22 @@ def _resolve_accuracy_components(
     return scorer_cls, extractor_cls
 
 
+def _validate_accuracy_config_for_scorer(
+    scorer_cls: type[Scorer],
+    dataset_name: str,
+    accuracy_config: Any,
+) -> None:
+    if (
+        scorer_cls.SCORER_ID == ScorerMethod.SWE_BENCH.value
+        and accuracy_config.num_repeats != 1
+    ):
+        raise InputValidationError(
+            f"Dataset '{dataset_name}' uses scorer '{scorer_cls.SCORER_ID}'; "
+            "accuracy_config.num_repeats must be 1 because SWE-bench evaluation "
+            "runs externally once per benchmark."
+        )
+
+
 def _load_datasets(
     config: BenchmarkConfig,
     report_dir: Path,
@@ -328,8 +345,17 @@ def _load_datasets(
         )
         assert acc_cfg.accuracy_config is not None
 
+        _validate_accuracy_config_for_scorer(
+            scorer_cls, acc_cfg.name, acc_cfg.accuracy_config
+        )
+        extras = acc_cfg.accuracy_config.extras or {}
+
+        scorer_cls.preflight(extras)
+
         ds = DataLoaderFactory.create_loader(
-            acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
+            acc_cfg,
+            num_repeats=acc_cfg.accuracy_config.num_repeats,
+            **scorer_cls.dataset_loader_kwargs(extras),
         )
         accuracy_datasets.append(ds)
         # TODO add tests and defaults
@@ -364,6 +390,13 @@ def _load_datasets(
         if len(performance_cfgs) > 1:
             raise InputValidationError("Multiple performance datasets not supported")
         perf_cfg = performance_cfgs[0]
+        perf_cls = Dataset.PREDEFINED.get(perf_cfg.name)
+        if perf_cls is not None and perf_cls.ACCURACY_ONLY:
+            raise InputValidationError(
+                f"Dataset '{perf_cfg.name}' is accuracy-only and cannot be used "
+                "as a performance dataset. Use a different dataset (e.g. 'random') "
+                "for the performance phase."
+            )
         # Override validity is enforced at config construction (see accuracy loop).
         perf_model_params = perf_cfg.effective_generation_config(config.model_params)
         try:
@@ -391,6 +424,10 @@ def _load_datasets(
             scorer_cls, extractor_cls = _resolve_accuracy_components(
                 perf_cfg.name, accuracy_config
             )
+            _validate_accuracy_config_for_scorer(
+                scorer_cls, perf_cfg.name, accuracy_config
+            )
+            scorer_cls.preflight(accuracy_config.extras or {})
 
             eval_configs.append(
                 AccuracyConfiguration(
@@ -497,8 +534,11 @@ def setup_benchmark(
             )
         total_samples = rt_settings.total_samples_to_issue()
 
-    if accuracy_datasets:
-        total_samples += sum(ds.num_samples() * ds.repeats for ds in accuracy_datasets)
+    total_samples += sum(
+        ec.dataset.num_samples() * ec.dataset.repeats
+        for ec in eval_configs
+        if not ec.scorer.SKIP_ENDPOINT_PHASE and ec.dataset_name != "performance"
+    )
 
     collect_responses = test_mode in (TestMode.ACC, TestMode.BOTH)
     logger.info(
@@ -510,6 +550,16 @@ def setup_benchmark(
         )
     else:
         logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
+    for ec in eval_configs:
+        if ec.scorer.SKIP_ENDPOINT_PHASE:
+            n = ec.scorer.external_sample_count(ec.extras)
+            if n is not None:
+                logger.info(
+                    "Accuracy dataset '%s' (%s): %d instances evaluated externally",
+                    ec.dataset_name,
+                    ec.scorer.SCORER_ID,
+                    n,
+                )
 
     return BenchmarkContext(
         config=config,
@@ -589,6 +639,8 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            continue
         if eval_cfg.dataset_type == DatasetType.PERFORMANCE:
             continue
         acc_ds = eval_cfg.dataset
