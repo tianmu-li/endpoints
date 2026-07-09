@@ -121,3 +121,40 @@ class TestSWEBenchGenerate:
         assert (
             tmp_path / "swe_bench" / "lite" / "dev" / "swe_bench_lite_dev.parquet"
         ).exists()
+
+    def test_corrupt_parquet_cache_reports_cache_path(self, tmp_path: Path):
+        cache_path = (
+            tmp_path
+            / "swe_bench"
+            / "verified"
+            / "test"
+            / "swe_bench_verified_test.parquet"
+        )
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text("not parquet")
+
+        with (
+            patch(
+                "inference_endpoint.dataset_manager.predefined.swe_bench.pd.read_parquet",
+                side_effect=ValueError("bad parquet"),
+            ),
+            pytest.raises(RuntimeError, match="appears corrupt"),
+        ):
+            SWEBench.generate(datasets_dir=tmp_path)
+
+    def test_huggingface_load_failure_is_logged_and_reraised(
+        self, tmp_path: Path, caplog
+    ):
+        error = RuntimeError("hf unavailable")
+        with (
+            patch(
+                "inference_endpoint.dataset_manager.predefined.swe_bench.load_from_huggingface",
+                side_effect=error,
+            ),
+            pytest.raises(RuntimeError, match="hf unavailable") as exc_info,
+            caplog.at_level("ERROR"),
+        ):
+            SWEBench.generate(datasets_dir=tmp_path, subset="lite", split="dev")
+
+        assert exc_info.value is error
+        assert "Error loading SWE-bench lite/dev from HuggingFace" in caplog.text

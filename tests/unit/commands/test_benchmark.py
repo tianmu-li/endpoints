@@ -39,6 +39,7 @@ from inference_endpoint.commands.benchmark.cli import (
 from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
     BenchmarkContext,
+    BenchmarkResult,
     ResponseCollector,
     _build_phases,
     _derive_profile_urls,
@@ -48,6 +49,7 @@ from inference_endpoint.commands.benchmark.execute import (
     _render_profile_status,
     _run_benchmark_async,
     _write_profiling_section,
+    finalize_benchmark,
     setup_benchmark,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -81,7 +83,11 @@ from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
 from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
-from inference_endpoint.load_generator.session import PhaseType
+from inference_endpoint.load_generator.session import (
+    PhaseResult,
+    PhaseType,
+    SessionResult,
+)
 from inference_endpoint.metrics.metric import Throughput
 from pydantic import ValidationError
 
@@ -107,10 +113,32 @@ class _SelfContainedScorer(Scorer, scorer_id="_test_skip_endpoint_phase"):
         return 1.0, 1
 
 
+class _ExternalCountScorer(Scorer, scorer_id="_test_external_sample_count"):
+    SKIP_ENDPOINT_PHASE = True
+
+    @classmethod
+    def external_sample_count(cls, extras):
+        return 2
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        return 1.0, 1
+
+
 class _FailingPreflightScorer(Scorer, scorer_id="_test_failing_preflight"):
     @classmethod
     def preflight(cls, extras):
         raise SetupError("mock preflight failure")
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+
+class _ScorerShouldNotRun(Scorer, scorer_id="_test_scorer_should_not_run"):
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("scorer should not be constructed")
 
     def score_single_sample(self, value, ground_truth):
         return 0.0
@@ -547,7 +575,7 @@ class TestAccuracyOnlyDataset:
             patch.object(SWEBench, "generate", return_value=fake_df),
             pytest.raises(InputValidationError, match="accuracy-only"),
         ):
-            _load_datasets(config, tmp_path)
+            _load_datasets(config, tmp_path, TestMode.PERF)
 
     @pytest.mark.unit
     def test_preflight_error_propagates(self, tmp_path):
@@ -578,7 +606,7 @@ class TestAccuracyOnlyDataset:
             ),
             pytest.raises(SetupError, match="mock preflight failure"),
         ):
-            _load_datasets(config, tmp_path)
+            _load_datasets(config, tmp_path, TestMode.ACC)
 
     @pytest.mark.unit
     def test_perf_dataset_with_accuracy_config_does_not_crash_load_datasets(
@@ -607,12 +635,114 @@ class TestAccuracyOnlyDataset:
             "_resolve_accuracy_components",
             return_value=(_SelfContainedScorer, None),
         ):
-            _, accuracy_datasets, eval_configs = _load_datasets(config, tmp_path)
+            _, accuracy_datasets, eval_configs = _load_datasets(
+                config, tmp_path, TestMode.BOTH
+            )
 
         # The perf dataset appends to eval_configs only, not accuracy_datasets.
         assert len(accuracy_datasets) == 0
         assert len(eval_configs) == 1
         assert eval_configs[0].dataset_name == "performance"
+
+    @pytest.mark.unit
+    def test_perf_mode_skips_accuracy_dataset_setup(self, tmp_path):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                },
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+
+        with (
+            patch.object(SWEBenchScorer, "preflight") as mock_preflight,
+            patch.object(SWEBench, "generate") as mock_generate,
+        ):
+            _, accuracy_datasets, eval_configs = _load_datasets(
+                config, tmp_path, TestMode.PERF
+            )
+
+        mock_preflight.assert_not_called()
+        mock_generate.assert_not_called()
+        assert accuracy_datasets == []
+        assert eval_configs == []
+
+    @pytest.mark.unit
+    def test_perf_mode_skips_performance_dataset_accuracy_config(self, tmp_path):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+
+        with patch.object(execute_mod, "_resolve_accuracy_components") as mock_resolve:
+            _, accuracy_datasets, eval_configs = _load_datasets(
+                config, tmp_path, TestMode.PERF
+            )
+
+        mock_resolve.assert_not_called()
+        assert accuracy_datasets == []
+        assert eval_configs == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("test_mode", [TestMode.ACC, TestMode.BOTH])
+    def test_accuracy_modes_load_accuracy_dataset_and_preflight(
+        self, tmp_path, test_mode
+    ):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                },
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+
+        with (
+            patch.object(SWEBenchScorer, "preflight") as mock_preflight,
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+        ):
+            _, accuracy_datasets, eval_configs = _load_datasets(
+                config, tmp_path, test_mode
+            )
+
+        mock_preflight.assert_called_once_with({})
+        assert len(accuracy_datasets) == 1
+        assert len(eval_configs) == 1
+        assert eval_configs[0].scorer is SWEBenchScorer
 
     @pytest.mark.unit
     def test_swe_bench_loader_receives_subset_and_split(self, tmp_path):
@@ -657,7 +787,7 @@ class TestAccuracyOnlyDataset:
             patch.object(SWEBenchScorer, "preflight", return_value=None),
             patch.object(SWEBench, "generate", side_effect=fake_generate),
         ):
-            _load_datasets(config, tmp_path)
+            _load_datasets(config, tmp_path, TestMode.ACC)
 
         assert captured == {"subset": "lite", "split": "dev"}
 
@@ -688,7 +818,7 @@ class TestAccuracyOnlyDataset:
         with pytest.raises(
             InputValidationError, match=r"accuracy_config\.num_repeats must be 1"
         ):
-            _load_datasets(config, tmp_path)
+            _load_datasets(config, tmp_path, TestMode.ACC)
 
 
 class TestYAMLTemplateValidation:
@@ -1645,6 +1775,199 @@ class TestBuildPhases:
         )
 
 
+class TestFinalizeBenchmark:
+    @pytest.mark.unit
+    def test_perf_mode_skips_accuracy_scoring_and_omits_scores(self, tmp_path):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=3,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        dataset = Dataset(pd.DataFrame({"prompt": ["q0", "q1", "q2"]}))
+        dataset.load()
+        ctx = BenchmarkContext(
+            config=config,
+            test_mode=TestMode.PERF,
+            report_dir=tmp_path,
+            tokenizer_name=None,
+            dataloader=dataset,
+            rt_settings=rt_settings,
+            total_samples=3,
+            eval_configs=[
+                AccuracyConfiguration(
+                    scorer=_ScorerShouldNotRun,
+                    extractor=None,
+                    dataset_name="accuracy",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                )
+            ],
+        )
+        phase = PhaseResult(
+            name="performance",
+            phase_type=PhaseType.PERFORMANCE,
+            uuid_to_index={"uuid-0": 0, "uuid-1": 1, "uuid-2": 2},
+            issued_count=3,
+            start_time_ns=0,
+            end_time_ns=1_000_000_000,
+        )
+        bench = BenchmarkResult(
+            session=SessionResult(
+                session_id="test",
+                phase_results=[phase],
+                start_time_ns=0,
+                end_time_ns=1_000_000_000,
+            ),
+            collector=ResponseCollector(),
+            report=None,
+            tmpfs_dir=tmp_path / "tmpfs",
+        )
+
+        finalize_benchmark(ctx, bench)
+
+        results = json.loads((tmp_path / "results.json").read_text())
+        assert results["results"]["total"] == 3
+        assert "accuracy_scores" not in results
+
+    @pytest.mark.unit
+    def test_skip_endpoint_phase_scorer_gets_empty_sample_idx_map(self, tmp_path):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=3,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        dataset = Dataset(pd.DataFrame({"prompt": ["q0", "q1", "q2"]}))
+        dataset.load()
+        ctx = BenchmarkContext(
+            config=config,
+            test_mode=TestMode.ACC,
+            report_dir=tmp_path,
+            tokenizer_name=None,
+            dataloader=dataset,
+            rt_settings=rt_settings,
+            total_samples=3,
+            eval_configs=[
+                AccuracyConfiguration(
+                    scorer=_SelfContainedScorer,
+                    extractor=None,
+                    dataset_name="external_accuracy",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                )
+            ],
+        )
+        phase = PhaseResult(
+            name="performance",
+            phase_type=PhaseType.PERFORMANCE,
+            uuid_to_index={"uuid-0": 0, "uuid-1": 1, "uuid-2": 2},
+            issued_count=3,
+            start_time_ns=0,
+            end_time_ns=1_000_000_000,
+        )
+        bench = BenchmarkResult(
+            session=SessionResult(
+                session_id="test",
+                phase_results=[phase],
+                start_time_ns=0,
+                end_time_ns=1_000_000_000,
+            ),
+            collector=ResponseCollector(),
+            report=None,
+            tmpfs_dir=tmp_path / "tmpfs",
+        )
+
+        finalize_benchmark(ctx, bench)
+
+        idx_map = json.loads((tmp_path / "sample_idx_map.json").read_text())
+        assert idx_map["performance"] == {"uuid-0": 0, "uuid-1": 1, "uuid-2": 2}
+        assert idx_map["external_accuracy"] == {}
+        results = json.loads((tmp_path / "results.json").read_text())
+        assert results["accuracy_scores"]["external_accuracy"]["score"] == 1.0
+
+    @pytest.mark.unit
+    def test_skip_endpoint_phase_scorer_reports_external_sample_count(self, tmp_path):
+        """num_samples reflects the scorer's declared count, not the full dataset."""
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=3,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        dataset = Dataset(pd.DataFrame({"prompt": ["q0", "q1", "q2"]}))
+        dataset.load()
+        ctx = BenchmarkContext(
+            config=config,
+            test_mode=TestMode.ACC,
+            report_dir=tmp_path,
+            tokenizer_name=None,
+            dataloader=dataset,
+            rt_settings=rt_settings,
+            total_samples=3,
+            eval_configs=[
+                AccuracyConfiguration(
+                    scorer=_ExternalCountScorer,
+                    extractor=None,
+                    dataset_name="external_accuracy",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                )
+            ],
+        )
+        phase = PhaseResult(
+            name="performance",
+            phase_type=PhaseType.PERFORMANCE,
+            uuid_to_index={"uuid-0": 0, "uuid-1": 1, "uuid-2": 2},
+            issued_count=3,
+            start_time_ns=0,
+            end_time_ns=1_000_000_000,
+        )
+        bench = BenchmarkResult(
+            session=SessionResult(
+                session_id="test",
+                phase_results=[phase],
+                start_time_ns=0,
+                end_time_ns=1_000_000_000,
+            ),
+            collector=ResponseCollector(),
+            report=None,
+            tmpfs_dir=tmp_path / "tmpfs",
+        )
+
+        finalize_benchmark(ctx, bench)
+
+        results = json.loads((tmp_path / "results.json").read_text())
+        assert results["accuracy_scores"]["external_accuracy"]["num_samples"] == 2
+
+
 class TestScorerMethodSync:
     """Ensure ScorerMethod enum stays in sync with the scorer registry."""
 
@@ -2079,6 +2402,70 @@ class TestPerfPhaseTimeout:
         assert handle.cancelled is True
 
 
+class TestSetupBenchmarkExternalSampleCountLogging:
+    """setup_benchmark logs declared external counts for self-contained scorers."""
+
+    @pytest.mark.unit
+    def test_logs_external_sample_count_for_skip_endpoint_phase_scorer(
+        self, tmp_path, caplog
+    ):
+        dataset = Dataset(pd.DataFrame({"prompt": ["q0"]}))
+        dataset.load()
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        rt_settings = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=1,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        eval_configs = [
+            AccuracyConfiguration(
+                scorer=_ExternalCountScorer,
+                extractor=None,
+                dataset_name="external_accuracy",
+                dataset=dataset,
+                report_dir=tmp_path,
+                ground_truth_column=None,
+                num_repeats=1,
+            )
+        ]
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.config.schema.BenchmarkConfig.to_yaml_file",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(dataset, [], eval_configs),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=rt_settings,
+            ),
+            caplog.at_level("INFO"),
+        ):
+            setup_benchmark(config, TestMode.ACC)
+
+        assert any(
+            "external_accuracy" in message and "evaluated externally" in message
+            for message in caplog.messages
+        )
+
+
 class TestProfilingHelpers:
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -2265,7 +2652,7 @@ class _OverrideTestBase:
         config = self._build_config(
             perf_path, acc_path, acc_override={"max_new_tokens": 32768}
         )
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.PERF)
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
         assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
 
@@ -2274,7 +2661,7 @@ class _OverrideTestBase:
         """Without overrides, both datasets use the global model_params."""
         perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(perf_path, acc_path, acc_override=None)
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.PERF)
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
         assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 1024
 
@@ -2289,7 +2676,7 @@ class _OverrideTestBase:
             acc_override={"max_new_tokens": 32768},
             perf_override={"max_new_tokens": 10240},
         )
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.PERF)
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 10240
         assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
 

@@ -337,9 +337,11 @@ def _load_datasets(
 
     accuracy_datasets: list[Dataset] = []
     eval_configs: list[AccuracyConfiguration] = []
+    load_accuracy = test_mode in (TestMode.ACC, TestMode.BOTH)
 
     # Pack the evaluation parameters for each accuracy dataset
-    for acc_cfg in accuracy_cfgs:
+    accuracy_cfgs_to_load = accuracy_cfgs if load_accuracy else []
+    for acc_cfg in accuracy_cfgs_to_load:
         scorer_cls, extractor_cls = _resolve_accuracy_components(
             acc_cfg.name, acc_cfg.accuracy_config
         )
@@ -379,7 +381,7 @@ def _load_datasets(
         ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
-    if not accuracy_cfgs:
+    if not accuracy_cfgs and load_accuracy:
         logger.info("No separate accuracy datasets provided")
 
     dataloader: Dataset | None = None
@@ -413,7 +415,7 @@ def _load_datasets(
         except Exception as e:
             raise SetupError(f"Failed to load dataset: {e}") from e
 
-        if perf_cfg.accuracy_config is not None:
+        if load_accuracy and perf_cfg.accuracy_config is not None:
             accuracy_config = perf_cfg.accuracy_config
             if accuracy_config.num_repeats != 1:
                 raise InputValidationError(
@@ -1269,6 +1271,9 @@ def _write_scoring_artifacts(
     sample_idx_map: dict[str, dict[str, int]] = {}
     for phase_result in result.phase_results:
         sample_idx_map[phase_result.name] = phase_result.uuid_to_index
+    for eval_cfg in ctx.eval_configs:
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            sample_idx_map.setdefault(eval_cfg.dataset_name, {})
 
     map_path = ctx.report_dir / "sample_idx_map.json"
     with map_path.open("wb") as f:
@@ -1495,6 +1500,11 @@ def _score_accuracy(
             total_samples = sum(phase.issued_count for phase in result.perf_results)
         else:
             total_samples = unit_samples * num_repeats
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            ext = eval_cfg.scorer.external_sample_count(eval_cfg.extras)
+            if ext is not None:
+                unit_samples = ext
+                total_samples = ext
         entry: dict[str, Any] = {
             "dataset_name": eval_cfg.dataset_name,
             "extractor": (
