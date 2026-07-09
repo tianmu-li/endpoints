@@ -333,9 +333,11 @@ def _load_datasets(
                 acc_cfg.accuracy_config.extras or {},
             )
         )
-        ds.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
-        )
+        # Value/api-type validity of the override is already enforced at config
+        # construction (BenchmarkConfig validates each dataset's effective params),
+        # so this cannot raise for a validated config.
+        ds_model_params = acc_cfg.effective_generation_config(config.model_params)
+        ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
@@ -349,16 +351,18 @@ def _load_datasets(
         if len(performance_cfgs) > 1:
             raise InputValidationError("Multiple performance datasets not supported")
         perf_cfg = performance_cfgs[0]
+        # Override validity is enforced at config construction (see accuracy loop).
+        perf_model_params = perf_cfg.effective_generation_config(config.model_params)
         try:
             dataloader = DataLoaderFactory.create_loader(perf_cfg)
             dataloader.load(
                 api_type=config.endpoint_config.api_type,
-                model_params=config.model_params,
+                model_params=perf_model_params,
             )
             logger.info(f"Loaded {dataloader.num_samples()} samples")
         except FileNotFoundError as e:
             raise InputValidationError(
-                f"Dataset file not found: {performance_cfgs[0].path}"
+                f"Dataset file not found: {perf_cfg.path}"
             ) from e
         except Exception as e:
             raise SetupError(f"Failed to load dataset: {e}") from e
