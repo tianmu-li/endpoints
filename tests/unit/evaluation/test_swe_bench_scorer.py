@@ -126,6 +126,12 @@ def _make_staged_run(on_eval_cmd):
     return fake_run
 
 
+class _CapturedSubprocessRuns(list):
+    def __init__(self):
+        super().__init__()
+        self.kwargs = []
+
+
 class _FakeTqdm:
     instances: list["_FakeTqdm"] = []
 
@@ -236,10 +242,11 @@ def _fake_as_completed(futures):
 @pytest.fixture
 def patch_subprocess(monkeypatch, report_dir: Path, swe_bench_project: Path):
     """Patch subprocess.run to write fake preds.json and result JSON."""
-    captured: list[list[str]] = []
+    captured = _CapturedSubprocessRuns()
 
     def fake_run(cmd, **kwargs):
         captured.append(list(cmd))
+        captured.kwargs.append(kwargs)
         cmd_str = " ".join(cmd)
         if "mini-extra" in cmd_str:
             output_dir = Path(cmd[cmd.index("--output") + 1])
@@ -264,6 +271,20 @@ def patch_subprocess(monkeypatch, report_dir: Path, swe_bench_project: Path):
     return captured
 
 
+class TestSWEBenchModuleHelpers:
+    def test_decode_subprocess_stderr_variants(self):
+        assert scoring_mod._decode_subprocess_stderr(None) == ""
+        assert scoring_mod._decode_subprocess_stderr(b"boom\n") == "boom"
+        assert scoring_mod._decode_subprocess_stderr("boom\n") == "boom"
+
+    def test_extract_json_array_from_mixed_output(self):
+        stdout = "some log line\n" + json.dumps(["a", "b"]) + "\ntrailing\n"
+        assert scoring_mod._extract_json_array_from_mixed_output(stdout) == ["a", "b"]
+        assert (
+            scoring_mod._extract_json_array_from_mixed_output("no arrays here") is None
+        )
+
+
 class TestSWEBenchScorerRegistration:
     def test_registered(self):
         assert "swe_bench_scorer" in Scorer.PREDEFINED
@@ -273,8 +294,11 @@ class TestSWEBenchScorerRegistration:
         assert SWEBenchScorer.SKIP_ENDPOINT_PHASE is True
 
     def test_external_sample_count(self):
-        assert SWEBenchScorer.external_sample_count({"num_instances": 100}) == 100
-        assert SWEBenchScorer.external_sample_count({}) is None
+        assert SWEBenchScorer.external_sample_count({"num_instances": 50}) == 50
+        assert (
+            SWEBenchScorer.external_sample_count({})
+            == SWEBenchScorer.DEFAULT_NUM_INSTANCES
+        )
         assert SWEBenchScorer.external_sample_count({"num_instances": "bad"}) is None
 
 
@@ -294,6 +318,10 @@ class TestSWEBenchScorer:
         assert score == pytest.approx(0.3)
         assert n_repeats == 1
         assert (report_dir / "swe_bench_results.json").exists()
+        assert {
+            kwargs["env"]["UV_PROJECT_ENVIRONMENT"]
+            for kwargs in patch_subprocess.kwargs
+        } == {str(swe_bench_project / ".venv")}
 
     def test_score_does_not_install_toolcall_patch_by_default(
         self,
@@ -427,6 +455,114 @@ class TestSWEBenchScorer:
 
         assert actions_dest.read_text() == "# original actions\n"
         assert litellm_dest.read_text() == "# original litellm\n"
+
+    def test_restore_toolcall_patch_removes_files_with_no_backup(self, tmp_path):
+        dest = tmp_path / "new_file.py"
+        dest.write_text("patched content\n")
+
+        SWEBenchScorer._restore_toolcall_patch([(dest, None)])
+
+        assert not dest.exists()
+
+    def test_install_toolcall_patch_missing_target_dir_raises(
+        self, swe_bench_project, tmp_path, monkeypatch
+    ):
+        _write_toolcall_patch_files(swe_bench_project)
+        # site_packages exists (so path resolution succeeds) but the deeper
+        # utils/ target directory for actions_toolcall.py is missing.
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+        actions_toolcall_file = (
+            site_packages / "minisweagent" / "models" / "utils" / "actions_toolcall.py"
+        )
+
+        def fake_run(cmd, **kwargs):
+            return MagicMock(
+                returncode=0, stdout=f"{actions_toolcall_file}\n", stderr=""
+            )
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SetupError, match="Target directory does not exist"):
+            SWEBenchScorer._install_toolcall_patch(swe_bench_project)
+
+    def test_install_toolcall_patch_restores_on_partial_failure(
+        self, swe_bench_project, tmp_path, monkeypatch
+    ):
+        _write_toolcall_patch_files(swe_bench_project)
+        site_packages = tmp_path / "site-packages"
+        actions_dest = (
+            site_packages / "minisweagent" / "models" / "utils" / "actions_toolcall.py"
+        )
+        litellm_dest = site_packages / "minisweagent" / "models" / "litellm_model.py"
+        actions_dest.parent.mkdir(parents=True)
+        actions_dest.write_text("# original actions\n")
+        litellm_dest.write_text("# original litellm\n")
+
+        def fake_run(cmd, **kwargs):
+            return MagicMock(returncode=0, stdout=str(actions_dest) + "\n", stderr="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            scoring_mod.shutil,
+            "copy2",
+            MagicMock(side_effect=OSError("disk full")),
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            SWEBenchScorer._install_toolcall_patch(swe_bench_project)
+
+        assert actions_dest.read_text() == "# original actions\n"
+        assert litellm_dest.read_text() == "# original litellm\n"
+
+    def test_score_missing_config_yaml_raises(
+        self, tmp_path, swe_bench_project, template_yaml
+    ):
+        report_dir = tmp_path / "empty_report"
+        report_dir.mkdir()
+        _write_sample_idx_map(report_dir)
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(FileNotFoundError, match="config.yaml not found"):
+            scorer.score()
+
+    def test_score_requires_loaded_dataset(
+        self, report_dir, swe_bench_project, template_yaml
+    ):
+        dataset = _make_dataset()
+        dataset.dataframe = None
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=dataset,
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(RuntimeError, match="dataset must be loaded"):
+            scorer.score()
+
+    def test_dataset_loader_kwargs_resolves_dataset_options(self):
+        assert SWEBenchScorer.dataset_loader_kwargs(
+            {"subset": "lite", "split": "train"}
+        ) == {"subset": "lite", "split": "train"}
+
+    def test_score_single_sample_raises(
+        self, report_dir, swe_bench_project, template_yaml
+    ):
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(RuntimeError, match="call score\\(\\) instead"):
+            scorer.score_single_sample("value", "ground_truth")
 
     def test_missing_subproject_raises_at_init(
         self, report_dir, tmp_path, template_yaml
@@ -611,6 +747,77 @@ class TestSWEBenchScorer:
 
         assert "max_tokens" not in patched["model"]["model_kwargs"]
 
+    def test_config_patching_no_endpoints_clears_api_base(
+        self, report_dir, swe_bench_project, template_yaml, tmp_path
+    ):
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        patched_path = scorer._patch_config(
+            output_dir,
+            {"model_params": {"name": _MODEL_NAME}, "endpoint_config": {}},
+        )
+        patched = yaml.safe_load(patched_path.read_text())
+
+        assert patched["model"]["model_kwargs"]["api_base"] == ""
+
+    def test_config_patching_strips_trailing_v1_from_endpoint(
+        self, report_dir, swe_bench_project, template_yaml, tmp_path
+    ):
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        patched_path = scorer._patch_config(
+            output_dir,
+            {
+                "model_params": {"name": _MODEL_NAME},
+                "endpoint_config": {"endpoints": ["http://localhost:30000/v1"]},
+            },
+        )
+        patched = yaml.safe_load(patched_path.read_text())
+
+        assert (
+            patched["model"]["model_kwargs"]["api_base"] == "http://localhost:30000/v1"
+        )
+
+    def test_config_patching_sets_api_key_when_present(
+        self, report_dir, swe_bench_project, template_yaml, tmp_path
+    ):
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        patched_path = scorer._patch_config(
+            output_dir,
+            {
+                "model_params": {"name": _MODEL_NAME},
+                "endpoint_config": {
+                    "endpoints": ["http://localhost:30000"],
+                    "api_key": "secret-key",
+                },
+            },
+        )
+        patched = yaml.safe_load(patched_path.read_text())
+
+        assert patched["model"]["model_kwargs"]["api_key"] == "secret-key"
+
     @pytest.mark.parametrize(
         "num_instances, expected_slice",
         [
@@ -704,6 +911,22 @@ class TestSWEBenchScorer:
 
         with pytest.raises(ValueError, match="model_params.name is required"):
             scorer._patch_config(output_dir, {"model_params": {}})
+
+    def test_score_missing_model_name_raises(
+        self, report_dir, swe_bench_project, template_yaml
+    ):
+        (report_dir / "config.yaml").write_text(
+            yaml.dump({"model_params": {}, "endpoint_config": {"endpoints": []}})
+        )
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(ValueError, match="model_params.name is required"):
+            scorer.score()
 
     def test_template_missing_model_kwargs_raises(
         self, report_dir, swe_bench_project, tmp_path
@@ -825,6 +1048,44 @@ class TestSWEBenchScorer:
         assert score is None
         assert n_repeats == 1
 
+    def test_num_instances_exceeding_dataset_warns_and_clamps(
+        self, report_dir, swe_bench_project, template_yaml, patch_subprocess, caplog
+    ):
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(n=3),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+            num_instances=10,
+        )
+        with caplog.at_level("WARNING"):
+            scorer.score()
+
+        assert any("exceeds dataset size" in message for message in caplog.messages)
+        agent_cmd = patch_subprocess[0]
+        assert agent_cmd[agent_cmd.index("--slice") + 1] == "0:3"
+
+    def test_score_removes_pre_existing_output_dir(
+        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
+    ):
+        output_dir = report_dir / "swe_bench_output"
+        output_dir.mkdir()
+        stale_file = output_dir / "stale.txt"
+        stale_file.write_text("stale")
+
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        scorer.score()
+
+        assert not stale_file.exists()
+        assert output_dir.exists()
+
 
 class TestSWEBenchScorerPreflight:
     def _extras(self, swe_bench_project: Path, **overrides) -> dict:
@@ -841,6 +1102,108 @@ class TestSWEBenchScorerPreflight:
             scoring_mod.concurrent.futures, "as_completed", _fake_as_completed
         )
 
+    def test_apply_tools_patch_uses_python_probe(
+        self, swe_bench_project, tmp_path, monkeypatch
+    ):
+        actions_path = (
+            tmp_path
+            / "site-packages"
+            / "minisweagent"
+            / "models"
+            / "utils"
+            / "actions_toolcall.py"
+        )
+        litellm_path = (
+            tmp_path / "site-packages" / "minisweagent" / "models" / "litellm_model.py"
+        )
+        actions_path.parent.mkdir(parents=True)
+        litellm_path.parent.mkdir(parents=True, exist_ok=True)
+        actions_path.write_text("old actions\n")
+        litellm_path.write_text("old litellm\n")
+        (swe_bench_project / "actions_toolcall.py").write_text("new actions\n")
+        (swe_bench_project / "litellm_model.py").write_text("new litellm\n")
+        captured: list[list[str]] = []
+        captured_kwargs: list[dict] = []
+
+        def fake_run(cmd, **kw):
+            captured.append(list(cmd))
+            captured_kwargs.append(kw)
+            return MagicMock(returncode=0, stdout=f"{actions_path}\n", stderr="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        SWEBenchScorer._install_toolcall_patch(swe_bench_project)
+
+        probe_cmd = captured[0]
+        assert probe_cmd[:5] == [
+            "uv",
+            "run",
+            "--project",
+            str(swe_bench_project),
+            "python",
+        ]
+        assert "python3" not in probe_cmd
+        assert captured_kwargs[0]["env"]["UV_PROJECT_ENVIRONMENT"] == str(
+            swe_bench_project / ".venv"
+        )
+        assert actions_path.read_text() == "new actions\n"
+        assert litellm_path.read_text() == "new litellm\n"
+
+    def test_resolve_site_packages_probe_failure_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=1, stdout="", stderr="ModuleNotFoundError")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SetupError, match="Could not locate minisweagent install"):
+            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
+
+    def test_resolve_site_packages_empty_stdout_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=0, stdout="\n", stderr="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SetupError, match="empty output"):
+            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
+
+    def test_resolve_site_packages_too_shallow_path_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=0, stdout="/a/b.py\n", stderr="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SetupError, match="Could not resolve site-packages"):
+            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
+
+    def test_resolve_site_packages_nonexistent_dir_raises(
+        self, swe_bench_project, tmp_path, monkeypatch
+    ):
+        nonexistent_actions_path = (
+            tmp_path
+            / "does-not-exist"
+            / "minisweagent"
+            / "models"
+            / "utils"
+            / "actions_toolcall.py"
+        )
+
+        def fake_run(cmd, **kw):
+            return MagicMock(
+                returncode=0, stdout=f"{nonexistent_actions_path}\n", stderr=""
+            )
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SetupError, match="does not exist"):
+            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
+
     def test_preflight_parallelizes_cached_and_missing_images(
         self, swe_bench_project, monkeypatch
     ):
@@ -851,6 +1214,7 @@ class TestSWEBenchScorerPreflight:
         self._patch_fake_executor(monkeypatch)
         monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
         captured: list[list[str]] = []
+        captured_kwargs: list[dict] = []
         _FakeThreadPoolExecutor.completion_order = [
             "docker.io/swebench/missing-a:latest",
             "docker.io/swebench/cached:latest",
@@ -859,6 +1223,7 @@ class TestSWEBenchScorerPreflight:
 
         def fake_run(cmd, **kw):
             captured.append(list(cmd))
+            captured_kwargs.append(kw)
             cmd_str = " ".join(cmd)
             if "get_swebench_docker_image_name" in cmd_str:
                 return MagicMock(
@@ -899,8 +1264,19 @@ class TestSWEBenchScorerPreflight:
         derive_cmd = next(
             cmd for cmd in captured if "get_swebench_docker_image_name" in " ".join(cmd)
         )
+        derive_idx = captured.index(derive_cmd)
         compile(derive_cmd[6], "<swebench-derive-images>", "exec")
         assert derive_cmd[-3:] == ["lite", "test", "3"]
+        assert captured_kwargs[derive_idx]["env"]["UV_PROJECT_ENVIRONMENT"] == str(
+            swe_bench_project / ".venv"
+        )
+        uv_run_idxs = [
+            i for i, cmd in enumerate(captured) if cmd[:3] == ["uv", "run", "--project"]
+        ]
+        assert len(uv_run_idxs) == 3
+        assert {
+            captured_kwargs[i]["env"]["UV_PROJECT_ENVIRONMENT"] for i in uv_run_idxs
+        } == {str(swe_bench_project / ".venv")}
         assert ["docker", "pull", "docker.io/swebench/cached:latest"] not in captured
         assert ["docker", "pull", "docker.io/swebench/missing-a:latest"] in captured
         assert ["docker", "pull", "docker.io/swebench/missing-b:latest"] in captured
@@ -953,6 +1329,28 @@ class TestSWEBenchScorerPreflight:
         assert _FakeTqdm.instances[0].updates == [1, 1]
         assert _FakeTqdm.instances[0].closed is True
         assert _FakeThreadPoolExecutor.instances[0].max_workers == 2
+
+    def test_prepull_images_noop_when_empty(self, monkeypatch):
+        def fake_run(cmd, **kw):
+            pytest.fail("subprocess.run should not be called for an empty image list")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        SWEBenchScorer._prepull_images([], workers=3)
+
+    def test_get_extra_int_non_numeric_raises(self):
+        with pytest.raises(SetupError, match="must be an integer"):
+            SWEBenchScorer._get_extra_int({"workers": "bad"}, "workers", default=1)
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [(True, True), (1, True), ("yes", True), ("off", False)],
+    )
+    def test_get_extra_bool_accepts_common_truthy_falsy_forms(self, value, expected):
+        assert SWEBenchScorer._get_extra_bool({"flag": value}, "flag") is expected
+
+    def test_get_extra_bool_rejects_unrecognized_value(self):
+        with pytest.raises(SetupError, match="must be a boolean"):
+            SWEBenchScorer._get_extra_bool({"flag": "maybe"}, "flag")
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -1007,6 +1405,46 @@ class TestSWEBenchScorerPreflight:
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
         with pytest.raises(SetupError, match="Docker daemon is not running"):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_docker_missing_from_path(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil,
+            "which",
+            lambda name: None if name == "docker" else f"/usr/bin/{name}",
+        )
+        monkeypatch.setattr(
+            scoring_mod.subprocess, "run", lambda cmd, **kw: MagicMock(returncode=0)
+        )
+        with pytest.raises(SetupError, match="docker is not on PATH"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_docker_command_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if cmd[:1] == ["docker"]:
+                raise OSError("docker binary not executable")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Failed to execute docker command"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_wraps_resolve_options_failure(
+        self, report_dir, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+        missing_project = tmp_path / "missing_project"
+        with pytest.raises(SetupError, match="SWE-bench subproject not found"):
+            SWEBenchScorer.preflight(self._extras(missing_project))
 
     def test_preflight_fails_when_pull_fails(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(
@@ -1066,6 +1504,112 @@ class TestSWEBenchScorerPreflight:
         assert executor.shutdown_calls == [{"wait": False, "cancel_futures": True}]
         future_by_image = {future.image: future for future in executor.submitted}
         assert future_by_image["docker.io/swebench/pending:latest"].cancelled is True
+
+    def test_derive_required_images_nonzero_returncode_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=1, stdout="", stderr="permission denied")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(
+            SetupError, match=r"Failed to derive required.*permission denied"
+        ):
+            SWEBenchScorer._derive_required_images(
+                swe_bench_project_path=swe_bench_project,
+                subset="lite",
+                split="test",
+                num_instances=3,
+            )
+
+    def test_derive_required_images_unparseable_output_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=0, stdout="not json", stderr="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Failed to parse the required"):
+            SWEBenchScorer._derive_required_images(
+                swe_bench_project_path=swe_bench_project,
+                subset="lite",
+                split="test",
+                num_instances=3,
+            )
+
+    def test_derive_required_images_invalid_list_raises(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=0, stdout=json.dumps([1, 2]), stderr="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="invalid SWE-bench Docker image list"):
+            SWEBenchScorer._derive_required_images(
+                swe_bench_project_path=swe_bench_project,
+                subset="lite",
+                split="test",
+                num_instances=3,
+            )
+
+    def test_prepull_image_inspect_timeout_raises_setup_error(self, monkeypatch):
+        def fake_run(cmd, **kw):
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Timed out inspecting"):
+            SWEBenchScorer._prepull_image("docker.io/swebench/test:latest")
+
+    def test_preflight_derive_images_timeout_raises_setup_error(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if "get_swebench_docker_image_name" in " ".join(cmd):
+                raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Timed out deriving required"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_prepull_timeout_raises_setup_error(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+        _FakeTqdm.reset()
+        self._patch_fake_executor(monkeypatch)
+        monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
+        _FakeThreadPoolExecutor.completion_order = [
+            "docker.io/swebench/test:latest",
+        ]
+
+        def fake_run(cmd, **kw):
+            cmd_str = " ".join(cmd)
+            if "get_swebench_docker_image_name" in cmd_str:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps(["docker.io/swebench/test:latest"]),
+                    stderr="",
+                )
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                return MagicMock(returncode=1, stdout="", stderr=b"missing")
+            if cmd[:2] == ["docker", "pull"]:
+                raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(
+            SetupError, match=r"Timed out pulling.*docker\.io/swebench/test:latest"
+        ):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
     def test_preflight_fails_invalid_workers(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(

@@ -1684,6 +1684,7 @@ def _run_subprocess_with_log(
     timeout_s: int | None,
     label: str,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> None:
     """Run *cmd*, capture stdout+stderr to *log_path*, raise on timeout or non-zero exit."""
     try:
@@ -1696,6 +1697,7 @@ def _run_subprocess_with_log(
             text=True,
             timeout=timeout_s,
             cwd=str(cwd) if cwd is not None else None,
+            env=env,
         )
     except subprocess.TimeoutExpired as e:
         partial = (
@@ -2050,13 +2052,20 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             split,
             str(num_instances),
         ]
-        result = subprocess.run(
-            derive_cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=cls.PREPULL_TIMEOUT_S,
-        )
+        try:
+            result = subprocess.run(
+                derive_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=cls.PREPULL_TIMEOUT_S,
+                env=_uv_subproject_env(swe_bench_project_path),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(
+                "Timed out deriving required SWE-bench Docker images from the "
+                f"accuracy subproject at {swe_bench_project_path}"
+            ) from exc
         if result.returncode != 0:
             stderr_text = _decode_subprocess_stderr(result.stderr)
             raise SetupError(
@@ -2081,21 +2090,31 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @classmethod
     def _prepull_image(cls, image: str) -> None:
-        inspect_result = subprocess.run(
-            ["docker", "image", "inspect", image],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=30,
-        )
+        try:
+            inspect_result = subprocess.run(
+                ["docker", "image", "inspect", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(
+                f"Timed out inspecting SWE-bench Docker image {image}"
+            ) from exc
         if inspect_result.returncode == 0:
             return
 
-        pull_result = subprocess.run(
-            ["docker", "pull", image],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=cls.PREPULL_TIMEOUT_S,
-        )
+        try:
+            pull_result = subprocess.run(
+                ["docker", "pull", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=cls.PREPULL_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(
+                f"Timed out pulling SWE-bench Docker image {image}"
+            ) from exc
         if pull_result.returncode != 0:
             stderr_text = _decode_subprocess_stderr(pull_result.stderr)
             raise SetupError(
@@ -2133,9 +2152,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @classmethod
     def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        raw = extras.get("num_instances", cls.DEFAULT_NUM_INSTANCES)
         try:
-            return int(extras["num_instances"])
-        except (KeyError, TypeError, ValueError):
+            return int(raw)
+        except (TypeError, ValueError):
             return None
 
     @classmethod
@@ -2170,6 +2190,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             timeout=30,
+            env=_uv_subproject_env(swe_bench_project_path),
         )
         if result.returncode != 0:
             stderr_text = _decode_subprocess_stderr(result.stderr)
@@ -2192,6 +2213,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             timeout=30,
+            env=_uv_subproject_env(swe_bench_project_path),
         )
         if swebench_result.returncode != 0:
             stderr_text = _decode_subprocess_stderr(swebench_result.stderr)
@@ -2241,13 +2263,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "run",
                 "--project",
                 str(swe_bench_project_path),
-                "python3",
+                "python",
                 "-c",
                 "import minisweagent.models.utils.actions_toolcall as m; print(m.__file__)",
             ],
             capture_output=True,
             text=True,
             timeout=30,
+            env=_uv_subproject_env(swe_bench_project_path),
         )
         if result.returncode != 0:
             raise SetupError(
@@ -2379,6 +2402,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             timeout_s=self.subprocess_timeout_s,
             label="SWE-bench",
             cwd=cwd,
+            env=_uv_subproject_env(self.swe_bench_project_path),
         )
 
     def score(self) -> tuple[float | None, int]:
@@ -2393,7 +2417,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         with config_path.open() as f:
             benchmark_cfg = yaml.safe_load(f)
 
-        model_name: str = benchmark_cfg["model_params"]["name"]
+        model_params = benchmark_cfg.get("model_params") or {}
+        model_name = model_params.get("name")
+        if not model_name:
+            raise ValueError(
+                "model_params.name is required in the benchmark config but is missing or empty"
+            )
         if self.enable_swebench_toolcall_patch:
             self._validate_toolcall_patch_model(model_name)
         if self.dataset.dataframe is None:

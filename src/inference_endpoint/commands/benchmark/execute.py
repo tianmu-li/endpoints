@@ -325,9 +325,11 @@ def _load_datasets(
 
     accuracy_datasets: list[Dataset] = []
     eval_configs: list[AccuracyConfiguration] = []
+    load_accuracy = test_mode in (TestMode.ACC, TestMode.BOTH)
 
     # Pack the evaluation parameters for each accuracy dataset
-    for acc_cfg in accuracy_cfgs:
+    accuracy_cfgs_to_load = accuracy_cfgs if load_accuracy else []
+    for acc_cfg in accuracy_cfgs_to_load:
         scorer_cls, extractor_cls = _resolve_accuracy_components(
             acc_cfg.name, acc_cfg.accuracy_config
         )
@@ -366,7 +368,7 @@ def _load_datasets(
         ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
-    if not accuracy_cfgs:
+    if not accuracy_cfgs and load_accuracy:
         logger.info("No separate accuracy datasets provided")
 
     dataloader: Dataset | None = None
@@ -400,7 +402,7 @@ def _load_datasets(
         except Exception as e:
             raise SetupError(f"Failed to load dataset: {e}") from e
 
-        if perf_cfg.accuracy_config is not None:
+        if load_accuracy and perf_cfg.accuracy_config is not None:
             accuracy_config = perf_cfg.accuracy_config
             if accuracy_config.num_repeats != 1:
                 raise InputValidationError(
@@ -1255,6 +1257,9 @@ def _write_scoring_artifacts(
     sample_idx_map: dict[str, dict[str, int]] = {}
     for phase_result in result.phase_results:
         sample_idx_map[phase_result.name] = phase_result.uuid_to_index
+    for eval_cfg in ctx.eval_configs:
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            sample_idx_map.setdefault(eval_cfg.dataset_name, {})
 
     map_path = ctx.report_dir / "sample_idx_map.json"
     with map_path.open("wb") as f:
@@ -1317,51 +1322,58 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
-    for eval_cfg in ctx.eval_configs:
-        try:
-            scorer_instance = eval_cfg.scorer(
-                eval_cfg.dataset_name,
-                eval_cfg.dataset,
-                eval_cfg.report_dir,
-                extractor=eval_cfg.extractor,
-                ground_truth_column=eval_cfg.ground_truth_column,
-                **eval_cfg.extras,
+    if ctx.test_mode in (TestMode.ACC, TestMode.BOTH):
+        for eval_cfg in ctx.eval_configs:
+            try:
+                scorer_instance = eval_cfg.scorer(
+                    eval_cfg.dataset_name,
+                    eval_cfg.dataset,
+                    eval_cfg.report_dir,
+                    extractor=eval_cfg.extractor,
+                    ground_truth_column=eval_cfg.ground_truth_column,
+                    **eval_cfg.extras,
+                )
+            except TypeError as e:
+                raise InputValidationError(
+                    f"Dataset '{eval_cfg.dataset_name}': invalid accuracy_config.extras "
+                    f"for scorer '{eval_cfg.scorer.__name__}': {e}"
+                ) from e
+            score, n_repeats = scorer_instance.score()
+            if eval_cfg.dataset.data is not None:
+                num_samples = len(eval_cfg.dataset.data)
+            elif eval_cfg.dataset.dataframe is not None:
+                num_samples = len(eval_cfg.dataset.dataframe)
+            else:
+                num_samples = 0
+            if eval_cfg.dataset_name == "performance":
+                num_samples = sum(phase.issued_count for phase in result.perf_results)
+            if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+                ext = eval_cfg.scorer.external_sample_count(eval_cfg.extras)
+                if ext is not None:
+                    num_samples = ext
+            entry: dict[str, Any] = {
+                "dataset_name": eval_cfg.dataset_name,
+                "num_samples": num_samples,
+                "extractor": (
+                    eval_cfg.extractor.__name__
+                    if eval_cfg.extractor is not None
+                    else None
+                ),
+                "ground_truth_column": eval_cfg.ground_truth_column,
+                "score": score,
+                # False when the scorer produced only a partial headline (e.g.
+                # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was unreachable),
+                # so a partial number is never mistaken for a complete one.
+                "complete": scorer_instance.complete,
+            }
+            breakdown = scorer_instance.score_breakdown()
+            if breakdown is not None:
+                entry["breakdown"] = breakdown
+            accuracy_scores[eval_cfg.dataset_name] = entry
+            logger.info(
+                f"Score for {eval_cfg.dataset_name}: {score} "
+                f"({n_repeats} repeats, complete={scorer_instance.complete})"
             )
-        except TypeError as e:
-            raise InputValidationError(
-                f"Dataset '{eval_cfg.dataset_name}': invalid accuracy_config.extras "
-                f"for scorer '{eval_cfg.scorer.__name__}': {e}"
-            ) from e
-        score, n_repeats = scorer_instance.score()
-        if eval_cfg.dataset.data is not None:
-            num_samples = len(eval_cfg.dataset.data)
-        elif eval_cfg.dataset.dataframe is not None:
-            num_samples = len(eval_cfg.dataset.dataframe)
-        else:
-            num_samples = 0
-        if eval_cfg.dataset_name == "performance":
-            num_samples = sum(phase.issued_count for phase in result.perf_results)
-        entry: dict[str, Any] = {
-            "dataset_name": eval_cfg.dataset_name,
-            "num_samples": num_samples,
-            "extractor": (
-                eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
-            ),
-            "ground_truth_column": eval_cfg.ground_truth_column,
-            "score": score,
-            # False when the scorer produced only a partial headline (e.g.
-            # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was unreachable),
-            # so a partial number is never mistaken for a complete one.
-            "complete": scorer_instance.complete,
-        }
-        breakdown = scorer_instance.score_breakdown()
-        if breakdown is not None:
-            entry["breakdown"] = breakdown
-        accuracy_scores[eval_cfg.dataset_name] = entry
-        logger.info(
-            f"Score for {eval_cfg.dataset_name}: {score} "
-            f"({n_repeats} repeats, complete={scorer_instance.complete})"
-        )
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:

@@ -31,7 +31,7 @@ uv run python -m swebench.harness.run_evaluation --help
 Override the default subproject path via env var if needed:
 
 ```bash
-export SWE_BENCH_PROJECT_PATH=/path/to/examples/10_Agentic_Inference/accuracy
+export SWE_BENCH_PROJECT_PATH="$(pwd)/examples/10_Agentic_Inference/accuracy"
 ```
 
 ## 2. End-to-end test (requires live endpoint)
