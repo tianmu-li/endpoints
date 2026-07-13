@@ -379,7 +379,8 @@ def _load_datasets(
         if len(performance_cfgs) > 1:
             raise InputValidationError("Multiple performance datasets not supported")
         perf_cfg = performance_cfgs[0]
-        perf_cls = Dataset.PREDEFINED.get(perf_cfg.name)
+        perf_base_name = perf_cfg.name.split("::")[0]
+        perf_cls = Dataset.PREDEFINED.get(perf_base_name)
         if perf_cls is not None and perf_cls.ACCURACY_ONLY:
             raise InputValidationError(
                 f"Dataset '{perf_cfg.name}' is accuracy-only and cannot be used "

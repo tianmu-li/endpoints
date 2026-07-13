@@ -273,15 +273,19 @@ def patch_subprocess(monkeypatch, report_dir: Path, swe_bench_project: Path):
 
 class TestSWEBenchModuleHelpers:
     def test_decode_subprocess_stderr_variants(self):
-        assert scoring_mod._decode_subprocess_stderr(None) == ""
-        assert scoring_mod._decode_subprocess_stderr(b"boom\n") == "boom"
-        assert scoring_mod._decode_subprocess_stderr("boom\n") == "boom"
+        assert SWEBenchScorer._decode_subprocess_stderr(None) == ""
+        assert SWEBenchScorer._decode_subprocess_stderr(b"boom\n") == "boom"
+        assert SWEBenchScorer._decode_subprocess_stderr("boom\n") == "boom"
 
     def test_extract_json_array_from_mixed_output(self):
         stdout = "some log line\n" + json.dumps(["a", "b"]) + "\ntrailing\n"
-        assert scoring_mod._extract_json_array_from_mixed_output(stdout) == ["a", "b"]
+        assert SWEBenchScorer._extract_json_array_from_mixed_output(stdout) == [
+            "a",
+            "b",
+        ]
         assert (
-            scoring_mod._extract_json_array_from_mixed_output("no arrays here") is None
+            SWEBenchScorer._extract_json_array_from_mixed_output("no arrays here")
+            is None
         )
 
 
@@ -1341,6 +1345,11 @@ class TestSWEBenchScorerPreflight:
         with pytest.raises(SetupError, match="must be an integer"):
             SWEBenchScorer._get_extra_int({"workers": "bad"}, "workers", default=1)
 
+    def test_get_extra_int_treats_explicit_null_as_missing(self):
+        assert (
+            SWEBenchScorer._get_extra_int({"workers": None}, "workers", default=7) == 7
+        )
+
     @pytest.mark.parametrize(
         "value, expected",
         [(True, True), (1, True), ("yes", True), ("off", False)],
@@ -1351,6 +1360,11 @@ class TestSWEBenchScorerPreflight:
     def test_get_extra_bool_rejects_unrecognized_value(self):
         with pytest.raises(SetupError, match="must be a boolean"):
             SWEBenchScorer._get_extra_bool({"flag": "maybe"}, "flag")
+
+    def test_get_extra_bool_treats_explicit_null_as_missing(self):
+        assert (
+            SWEBenchScorer._get_extra_bool({"flag": None}, "flag", default=True) is True
+        )
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -1654,7 +1668,7 @@ class TestSWEBenchExampleConfigs:
         assert extras["enable_swebench_toolcall_patch"] is True
         assert (
             extras["swebench_config_template"]
-            == "examples/10_Agentic_Inference/swebench_qwen_tools_template.yaml"
+            == "examples/10_Agentic_Inference/accuracy/swebench_qwen_tools_template.yaml"
         )
 
     def test_kimi_config_leaves_toolcall_patch_disabled(self):

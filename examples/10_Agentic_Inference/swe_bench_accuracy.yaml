@@ -29,7 +29,7 @@ datasets:
       extras:
         num_instances: 200
         enable_swebench_toolcall_patch: true
-        swebench_config_template: "examples/10_Agentic_Inference/swebench_qwen_tools_template.yaml"
+        swebench_config_template: "examples/10_Agentic_Inference/accuracy/swebench_qwen_tools_template.yaml"
         # subset: "lite"
         # split: "test"
 
