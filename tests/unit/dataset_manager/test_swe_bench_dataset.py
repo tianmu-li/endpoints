@@ -96,31 +96,30 @@ class TestSWEBenchGenerate:
             SWEBench.generate(datasets_dir=tmp_path, force=True)
             assert mock_hf.call_count == 2
 
-    def test_lite_subset(self, tmp_path: Path):
+    @pytest.mark.parametrize(
+        ("subset", "split", "expected_repo"),
+        [
+            ("lite", "dev", "princeton-nlp/SWE-bench_Lite"),
+            ("verified", "test", "princeton-nlp/SWE-bench_Verified"),
+        ],
+    )
+    def test_subset_and_split_select_hf_repo_and_cache_directory(
+        self, tmp_path: Path, subset: str, split: str, expected_repo: str
+    ):
         with patch(
             "inference_endpoint.dataset_manager.predefined.swe_bench.load_from_huggingface",
             return_value=_make_hf_df(),
         ) as mock_hf:
-            df = SWEBench.generate(datasets_dir=tmp_path, subset="lite")
+            df = SWEBench.generate(datasets_dir=tmp_path, subset=subset, split=split)
 
-        call_kwargs = mock_hf.call_args
-        assert "princeton-nlp/SWE-bench_Lite" in call_kwargs[0]
-        assert len(df) == 5
-
-    def test_non_default_split_uses_split_specific_cache_path(self, tmp_path: Path):
-        with patch(
-            "inference_endpoint.dataset_manager.predefined.swe_bench.load_from_huggingface",
-            return_value=_make_hf_df(),
-        ) as mock_hf:
-            SWEBench.generate(datasets_dir=tmp_path, subset="lite", split="dev")
-
-        assert mock_hf.call_args.kwargs["split"] == "dev"
+        assert mock_hf.call_args.args == (expected_repo,)
+        assert mock_hf.call_args.kwargs["split"] == split
         assert mock_hf.call_args.kwargs["cache_dir"] == (
-            tmp_path / "hf_cache" / "swe_bench_lite_dev"
+            tmp_path / "hf_cache" / f"swe_bench_{subset}_{split}"
         )
-        assert (
-            tmp_path / "swe_bench" / "lite" / "dev" / "swe_bench_lite_dev.parquet"
-        ).exists()
+        assert len(df) == 5
+        cache_dir = tmp_path / "swe_bench" / subset / split
+        assert len(list(cache_dir.glob("*.parquet"))) == 1
 
     def test_corrupt_parquet_cache_reports_cache_path(self, tmp_path: Path):
         cache_path = (
