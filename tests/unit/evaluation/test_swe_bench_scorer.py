@@ -1164,6 +1164,17 @@ class TestSWEBenchScorerPreflight:
         with pytest.raises(SetupError, match="Could not locate minisweagent install"):
             SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
 
+    def test_resolve_site_packages_timeout_raises_setup_error(
+        self, swe_bench_project, monkeypatch
+    ):
+        def fake_run(cmd, **kw):
+            raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SetupError, match="Timed out locating minisweagent"):
+            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
+
     def test_resolve_site_packages_empty_stdout_raises(
         self, swe_bench_project, monkeypatch
     ):
@@ -1387,6 +1398,22 @@ class TestSWEBenchScorerPreflight:
         ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
+    def test_preflight_mini_extra_timeout_raises_setup_error(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if "mini-extra" in cmd:
+                raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Timed out probing mini-extra"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
     def test_preflight_fails_swebench_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
@@ -1402,6 +1429,22 @@ class TestSWEBenchScorerPreflight:
             SetupError,
             match=r"swebench is not available.*stderr: ModuleNotFoundError",
         ):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_swebench_probe_timeout_raises_setup_error(
+        self, swe_bench_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if "import swebench" in " ".join(cmd):
+                raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Timed out probing swebench"):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
     def test_preflight_fails_docker_not_running(self, swe_bench_project, monkeypatch):
