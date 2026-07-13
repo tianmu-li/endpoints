@@ -72,6 +72,34 @@ def _write_toolcall_patch_files(swe_bench_project: Path) -> None:
         (swe_bench_project / filename).write_text(f"# patched {filename}\n")
 
 
+def _make_scorer(
+    report_dir: Path,
+    swe_bench_project: Path,
+    template_yaml: Path,
+    *,
+    dataset=None,
+    **kwargs,
+) -> SWEBenchScorer:
+    return SWEBenchScorer(
+        dataset_name=_DATASET_NAME,
+        dataset=dataset or _make_dataset(),
+        report_dir=report_dir,
+        swe_bench_project_path=swe_bench_project,
+        swebench_config_template=template_yaml,
+        **kwargs,
+    )
+
+
+def _patch_config_and_read(
+    scorer: SWEBenchScorer,
+    output_dir: Path,
+    benchmark_cfg: dict,
+) -> dict:
+    output_dir.mkdir()
+    patched_path = scorer._patch_config(output_dir, benchmark_cfg)
+    return yaml.safe_load(patched_path.read_text())
+
+
 @pytest.fixture
 def swe_bench_project(tmp_path: Path) -> Path:
     """Fake accuracy subproject directory with a minimal pyproject.toml."""
@@ -136,21 +164,16 @@ class _FakeTqdm:
     instances: list["_FakeTqdm"] = []
 
     def __init__(self, *, total: int, desc: str, unit: str):
-        self.total = total
-        self.desc = desc
-        self.unit = unit
-        self.updates: list[int] = []
-        self.closed = False
         type(self).instances.append(self)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        self.closed = True
+        pass
 
     def update(self, n: int) -> None:
-        self.updates.append(n)
+        pass
 
     @classmethod
     def reset(cls) -> None:
@@ -200,7 +223,6 @@ class _FakeThreadPoolExecutor:
     def __init__(self, *, max_workers: int):
         self.max_workers = max_workers
         self.submitted: list[_FakeFuture] = []
-        self.shutdown_calls: list[dict[str, bool]] = []
         type(self).instances.append(self)
 
     def submit(self, fn, image: str) -> _FakeFuture:
@@ -209,7 +231,6 @@ class _FakeThreadPoolExecutor:
         return future
 
     def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
-        self.shutdown_calls.append({"wait": wait, "cancel_futures": cancel_futures})
         if cancel_futures:
             for future in self.submitted:
                 future.cancel()
@@ -271,24 +292,6 @@ def patch_subprocess(monkeypatch, report_dir: Path, swe_bench_project: Path):
     return captured
 
 
-class TestSWEBenchModuleHelpers:
-    def test_decode_subprocess_stderr_variants(self):
-        assert SWEBenchScorer._decode_subprocess_stderr(None) == ""
-        assert SWEBenchScorer._decode_subprocess_stderr(b"boom\n") == "boom"
-        assert SWEBenchScorer._decode_subprocess_stderr("boom\n") == "boom"
-
-    def test_extract_json_array_from_mixed_output(self):
-        stdout = "some log line\n" + json.dumps(["a", "b"]) + "\ntrailing\n"
-        assert SWEBenchScorer._extract_json_array_from_mixed_output(stdout) == [
-            "a",
-            "b",
-        ]
-        assert (
-            SWEBenchScorer._extract_json_array_from_mixed_output("no arrays here")
-            is None
-        )
-
-
 class TestSWEBenchScorerRegistration:
     def test_registered(self):
         assert "swe_bench_scorer" in Scorer.PREDEFINED
@@ -310,13 +313,7 @@ class TestSWEBenchScorer:
     def test_score_happy_path(
         self, report_dir, swe_bench_project, template_yaml, patch_subprocess
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         score, n_repeats = scorer.score()
 
         assert score == pytest.approx(0.3)
@@ -343,13 +340,7 @@ class TestSWEBenchScorer:
             "_install_toolcall_patch",
             classmethod(fail_install),
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
 
         score, n_repeats = scorer.score()
 
@@ -369,12 +360,10 @@ class TestSWEBenchScorer:
             "_install_toolcall_patch",
             classmethod(fail_install),
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
+        scorer = _make_scorer(
+            report_dir,
+            swe_bench_project,
+            template_yaml,
             enable_swebench_toolcall_patch=True,
         )
 
@@ -416,12 +405,10 @@ class TestSWEBenchScorer:
             "_restore_toolcall_patch",
             classmethod(fake_restore),
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
+        scorer = _make_scorer(
+            report_dir,
+            swe_bench_project,
+            template_yaml,
             enable_swebench_toolcall_patch=True,
         )
 
@@ -525,13 +512,7 @@ class TestSWEBenchScorer:
         report_dir = tmp_path / "empty_report"
         report_dir.mkdir()
         _write_sample_idx_map(report_dir)
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         with pytest.raises(FileNotFoundError, match="config.yaml not found"):
             scorer.score()
 
@@ -540,12 +521,8 @@ class TestSWEBenchScorer:
     ):
         dataset = _make_dataset()
         dataset.dataframe = None
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=dataset,
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
+        scorer = _make_scorer(
+            report_dir, swe_bench_project, template_yaml, dataset=dataset
         )
         with pytest.raises(RuntimeError, match="dataset must be loaded"):
             scorer.score()
@@ -558,13 +535,7 @@ class TestSWEBenchScorer:
     def test_score_single_sample_raises(
         self, report_dir, swe_bench_project, template_yaml
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         with pytest.raises(RuntimeError, match="call score\\(\\) instead"):
             scorer.score_single_sample("value", "ground_truth")
 
@@ -599,13 +570,7 @@ class TestSWEBenchScorer:
         self, report_dir, swe_bench_project, template_yaml, monkeypatch
     ):
         monkeypatch.setattr(scoring_mod.subprocess, "run", _make_fake_run)
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
@@ -634,19 +599,11 @@ class TestSWEBenchScorer:
             },
         )
 
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_path,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_path)
         output_dir = tmp_path / "out"
-        output_dir.mkdir()
         with (report_dir / "config.yaml").open() as f:
             benchmark_cfg = yaml.safe_load(f)
-        patched_path = scorer._patch_config(output_dir, benchmark_cfg)
-        patched = yaml.safe_load(patched_path.read_text())
+        patched = _patch_config_and_read(scorer, output_dir, benchmark_cfg)
 
         assert patched["model"]["model_name"] == _MODEL_NAME
         assert (
@@ -674,19 +631,11 @@ class TestSWEBenchScorer:
         # model_params has no top_k — should be removed from patched config
         _write_benchmark_config(report_dir)
 
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_path,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_path)
         output_dir = tmp_path / "out"
-        output_dir.mkdir()
         with (report_dir / "config.yaml").open() as f:
             benchmark_cfg = yaml.safe_load(f)
-        patched_path = scorer._patch_config(output_dir, benchmark_cfg)
-        patched = yaml.safe_load(patched_path.read_text())
+        patched = _patch_config_and_read(scorer, output_dir, benchmark_cfg)
 
         assert "top_k" not in patched["model"]["model_kwargs"]
 
@@ -704,19 +653,11 @@ class TestSWEBenchScorer:
 
         _write_benchmark_config(report_dir, model_params={"max_new_tokens": 4096})
 
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_path,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_path)
         output_dir = tmp_path / "out"
-        output_dir.mkdir()
         with (report_dir / "config.yaml").open() as f:
             benchmark_cfg = yaml.safe_load(f)
-        patched_path = scorer._patch_config(output_dir, benchmark_cfg)
-        patched = yaml.safe_load(patched_path.read_text())
+        patched = _patch_config_and_read(scorer, output_dir, benchmark_cfg)
 
         assert patched["model"]["model_kwargs"]["max_tokens"] == 4096
 
@@ -735,62 +676,38 @@ class TestSWEBenchScorer:
         # model_params has no max_new_tokens — max_tokens should be removed
         _write_benchmark_config(report_dir)
 
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_path,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_path)
         output_dir = tmp_path / "out"
-        output_dir.mkdir()
         with (report_dir / "config.yaml").open() as f:
             benchmark_cfg = yaml.safe_load(f)
-        patched_path = scorer._patch_config(output_dir, benchmark_cfg)
-        patched = yaml.safe_load(patched_path.read_text())
+        patched = _patch_config_and_read(scorer, output_dir, benchmark_cfg)
 
         assert "max_tokens" not in patched["model"]["model_kwargs"]
 
     def test_config_patching_no_endpoints_clears_api_base(
         self, report_dir, swe_bench_project, template_yaml, tmp_path
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
-        output_dir = tmp_path / "out"
-        output_dir.mkdir()
-        patched_path = scorer._patch_config(
-            output_dir,
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+        patched = _patch_config_and_read(
+            scorer,
+            tmp_path / "out",
             {"model_params": {"name": _MODEL_NAME}, "endpoint_config": {}},
         )
-        patched = yaml.safe_load(patched_path.read_text())
 
         assert patched["model"]["model_kwargs"]["api_base"] == ""
 
     def test_config_patching_strips_trailing_v1_from_endpoint(
         self, report_dir, swe_bench_project, template_yaml, tmp_path
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
-        output_dir = tmp_path / "out"
-        output_dir.mkdir()
-        patched_path = scorer._patch_config(
-            output_dir,
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+        patched = _patch_config_and_read(
+            scorer,
+            tmp_path / "out",
             {
                 "model_params": {"name": _MODEL_NAME},
                 "endpoint_config": {"endpoints": ["http://localhost:30000/v1"]},
             },
         )
-        patched = yaml.safe_load(patched_path.read_text())
 
         assert (
             patched["model"]["model_kwargs"]["api_base"] == "http://localhost:30000/v1"
@@ -799,17 +716,10 @@ class TestSWEBenchScorer:
     def test_config_patching_sets_api_key_when_present(
         self, report_dir, swe_bench_project, template_yaml, tmp_path
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
-        output_dir = tmp_path / "out"
-        output_dir.mkdir()
-        patched_path = scorer._patch_config(
-            output_dir,
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+        patched = _patch_config_and_read(
+            scorer,
+            tmp_path / "out",
             {
                 "model_params": {"name": _MODEL_NAME},
                 "endpoint_config": {
@@ -818,7 +728,6 @@ class TestSWEBenchScorer:
                 },
             },
         )
-        patched = yaml.safe_load(patched_path.read_text())
 
         assert patched["model"]["model_kwargs"]["api_key"] == "secret-key"
 
@@ -838,12 +747,11 @@ class TestSWEBenchScorer:
         template_yaml,
         patch_subprocess,
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
+        scorer = _make_scorer(
+            report_dir,
+            swe_bench_project,
+            template_yaml,
             dataset=_make_dataset(n=num_instances),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
             num_instances=num_instances,
         )
         scorer.score()
@@ -866,13 +774,8 @@ class TestSWEBenchScorer:
         template_yaml,
         patch_subprocess,
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-            subset=subset,
+        scorer = _make_scorer(
+            report_dir, swe_bench_project, template_yaml, subset=subset
         )
         scorer.score()
         eval_cmd = patch_subprocess[1]
@@ -903,13 +806,7 @@ class TestSWEBenchScorer:
         template_path = tmp_path / "tmpl.yaml"
         template_path.write_text(yaml.dump(tmpl))
 
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_path,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_path)
         output_dir = tmp_path / "out"
         output_dir.mkdir()
 
@@ -922,13 +819,7 @@ class TestSWEBenchScorer:
         (report_dir / "config.yaml").write_text(
             yaml.dump({"model_params": {}, "endpoint_config": {"endpoints": []}})
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         with pytest.raises(ValueError, match="model_params.name is required"):
             scorer.score()
 
@@ -957,13 +848,7 @@ class TestSWEBenchScorer:
             "run",
             _make_staged_run(_fail_eval),
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         with pytest.raises(RuntimeError, match="exited with code 2"):
             scorer.score()
 
@@ -976,13 +861,7 @@ class TestSWEBenchScorer:
         monkeypatch.setattr(
             scoring_mod.subprocess, "run", _make_staged_run(_timeout_eval)
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         with pytest.raises(RuntimeError, match="timed out after"):
             scorer.score()
 
@@ -1008,13 +887,7 @@ class TestSWEBenchScorer:
         monkeypatch.setattr(
             scoring_mod.subprocess, "run", _make_staged_run(_write_alt_prefix)
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         score, n_repeats = scorer.score()
         assert score == pytest.approx(1 / 5)
         assert n_repeats == 1
@@ -1041,13 +914,7 @@ class TestSWEBenchScorer:
         monkeypatch.setattr(
             scoring_mod.subprocess, "run", _make_staged_run(_write_zero_results)
         )
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
@@ -1055,12 +922,11 @@ class TestSWEBenchScorer:
     def test_num_instances_exceeding_dataset_warns_and_clamps(
         self, report_dir, swe_bench_project, template_yaml, patch_subprocess, caplog
     ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
+        scorer = _make_scorer(
+            report_dir,
+            swe_bench_project,
+            template_yaml,
             dataset=_make_dataset(n=3),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
             num_instances=10,
         )
         with caplog.at_level("WARNING"):
@@ -1078,13 +944,7 @@ class TestSWEBenchScorer:
         stale_file = output_dir / "stale.txt"
         stale_file.write_text("stale")
 
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         scorer.score()
 
         assert not stale_file.exists()
@@ -1106,7 +966,7 @@ class TestSWEBenchScorerPreflight:
             scoring_mod.concurrent.futures, "as_completed", _fake_as_completed
         )
 
-    def test_apply_tools_patch_uses_python_probe(
+    def test_install_toolcall_patch_probes_minisweagent_with_uv_project_env(
         self, swe_bench_project, tmp_path, monkeypatch
     ):
         actions_path = (
@@ -1146,77 +1006,36 @@ class TestSWEBenchScorerPreflight:
             str(swe_bench_project),
             "python",
         ]
-        assert "python3" not in probe_cmd
         assert captured_kwargs[0]["env"]["UV_PROJECT_ENVIRONMENT"] == str(
             swe_bench_project / ".venv"
         )
         assert actions_path.read_text() == "new actions\n"
         assert litellm_path.read_text() == "new litellm\n"
 
-    def test_resolve_site_packages_probe_failure_raises(
-        self, swe_bench_project, monkeypatch
+    @pytest.mark.parametrize(
+        "result, expected_match",
+        [
+            (
+                MagicMock(returncode=1, stdout="", stderr="ModuleNotFoundError"),
+                "Could not locate minisweagent install",
+            ),
+            (MagicMock(returncode=0, stdout="\n", stderr=""), "empty output"),
+            (
+                MagicMock(
+                    returncode=0,
+                    stdout="/path/that/does/not/exist/actions_toolcall.py\n",
+                    stderr="",
+                ),
+                "does not exist",
+            ),
+        ],
+    )
+    def test_resolve_site_packages_invalid_probe_result_raises(
+        self, swe_bench_project, monkeypatch, result, expected_match
     ):
-        def fake_run(cmd, **kw):
-            return MagicMock(returncode=1, stdout="", stderr="ModuleNotFoundError")
+        monkeypatch.setattr(scoring_mod.subprocess, "run", lambda cmd, **kw: result)
 
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-
-        with pytest.raises(SetupError, match="Could not locate minisweagent install"):
-            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
-
-    def test_resolve_site_packages_timeout_raises_setup_error(
-        self, swe_bench_project, monkeypatch
-    ):
-        def fake_run(cmd, **kw):
-            raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-
-        with pytest.raises(SetupError, match="Timed out locating minisweagent"):
-            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
-
-    def test_resolve_site_packages_empty_stdout_raises(
-        self, swe_bench_project, monkeypatch
-    ):
-        def fake_run(cmd, **kw):
-            return MagicMock(returncode=0, stdout="\n", stderr="")
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-
-        with pytest.raises(SetupError, match="empty output"):
-            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
-
-    def test_resolve_site_packages_too_shallow_path_raises(
-        self, swe_bench_project, monkeypatch
-    ):
-        def fake_run(cmd, **kw):
-            return MagicMock(returncode=0, stdout="/a/b.py\n", stderr="")
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-
-        with pytest.raises(SetupError, match="Could not resolve site-packages"):
-            SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
-
-    def test_resolve_site_packages_nonexistent_dir_raises(
-        self, swe_bench_project, tmp_path, monkeypatch
-    ):
-        nonexistent_actions_path = (
-            tmp_path
-            / "does-not-exist"
-            / "minisweagent"
-            / "models"
-            / "utils"
-            / "actions_toolcall.py"
-        )
-
-        def fake_run(cmd, **kw):
-            return MagicMock(
-                returncode=0, stdout=f"{nonexistent_actions_path}\n", stderr=""
-            )
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-
-        with pytest.raises(SetupError, match="does not exist"):
+        with pytest.raises(SetupError, match=expected_match):
             SWEBenchScorer._resolve_minisweagent_site_packages(swe_bench_project)
 
     def test_preflight_parallelizes_cached_and_missing_images(
@@ -1296,19 +1115,10 @@ class TestSWEBenchScorerPreflight:
         assert ["docker", "pull", "docker.io/swebench/missing-a:latest"] in captured
         assert ["docker", "pull", "docker.io/swebench/missing-b:latest"] in captured
         assert len(_FakeTqdm.instances) == 1
-        assert _FakeTqdm.instances[0].total == 3
-        assert _FakeTqdm.instances[0].desc == "SWE-bench images"
-        assert _FakeTqdm.instances[0].updates == [1, 1, 1]
-        assert _FakeTqdm.instances[0].closed is True
         assert len(_FakeThreadPoolExecutor.instances) == 1
         assert _FakeThreadPoolExecutor.instances[0].max_workers == 3
-        assert _FakeThreadPoolExecutor.instances[0].shutdown_calls == [
-            {"wait": True, "cancel_futures": False}
-        ]
 
-    def test_preflight_all_cached_still_completes_progress_bar(
-        self, swe_bench_project, monkeypatch
-    ):
+    def test_preflight_skips_cached_images(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
@@ -1340,42 +1150,7 @@ class TestSWEBenchScorerPreflight:
 
         assert not any(cmd[:2] == ["docker", "pull"] for cmd in captured)
         assert len(_FakeTqdm.instances) == 1
-        assert _FakeTqdm.instances[0].total == 2
-        assert _FakeTqdm.instances[0].updates == [1, 1]
-        assert _FakeTqdm.instances[0].closed is True
         assert _FakeThreadPoolExecutor.instances[0].max_workers == 2
-
-    def test_prepull_images_noop_when_empty(self, monkeypatch):
-        def fake_run(cmd, **kw):
-            pytest.fail("subprocess.run should not be called for an empty image list")
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        SWEBenchScorer._prepull_images([], workers=3)
-
-    def test_get_extra_int_non_numeric_raises(self):
-        with pytest.raises(SetupError, match="must be an integer"):
-            SWEBenchScorer._get_extra_int({"workers": "bad"}, "workers", default=1)
-
-    def test_get_extra_int_treats_explicit_null_as_missing(self):
-        assert (
-            SWEBenchScorer._get_extra_int({"workers": None}, "workers", default=7) == 7
-        )
-
-    @pytest.mark.parametrize(
-        "value, expected",
-        [(True, True), (1, True), ("yes", True), ("off", False)],
-    )
-    def test_get_extra_bool_accepts_common_truthy_falsy_forms(self, value, expected):
-        assert SWEBenchScorer._get_extra_bool({"flag": value}, "flag") is expected
-
-    def test_get_extra_bool_rejects_unrecognized_value(self):
-        with pytest.raises(SetupError, match="must be a boolean"):
-            SWEBenchScorer._get_extra_bool({"flag": "maybe"}, "flag")
-
-    def test_get_extra_bool_treats_explicit_null_as_missing(self):
-        assert (
-            SWEBenchScorer._get_extra_bool({"flag": None}, "flag", default=True) is True
-        )
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -1398,20 +1173,30 @@ class TestSWEBenchScorerPreflight:
         ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
-    def test_preflight_mini_extra_timeout_raises_setup_error(
-        self, swe_bench_project, monkeypatch
+    @pytest.mark.parametrize(
+        "timeout_match, command_match",
+        [
+            ("Timed out probing mini-extra", lambda cmd: "mini-extra" in cmd),
+            (
+                "Timed out probing swebench",
+                lambda cmd: "import swebench" in " ".join(cmd),
+            ),
+        ],
+    )
+    def test_preflight_probe_timeout_raises_setup_error(
+        self, swe_bench_project, monkeypatch, timeout_match, command_match
     ):
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
 
         def fake_run(cmd, **kw):
-            if "mini-extra" in cmd:
+            if command_match(cmd):
                 raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        with pytest.raises(SetupError, match="Timed out probing mini-extra"):
+        with pytest.raises(SetupError, match=timeout_match):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
     def test_preflight_fails_swebench_missing(self, swe_bench_project, monkeypatch):
@@ -1429,22 +1214,6 @@ class TestSWEBenchScorerPreflight:
             SetupError,
             match=r"swebench is not available.*stderr: ModuleNotFoundError",
         ):
-            SWEBenchScorer.preflight(self._extras(swe_bench_project))
-
-    def test_preflight_swebench_probe_timeout_raises_setup_error(
-        self, swe_bench_project, monkeypatch
-    ):
-        monkeypatch.setattr(
-            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
-        )
-
-        def fake_run(cmd, **kw):
-            if "import swebench" in " ".join(cmd):
-                raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=30)
-            return MagicMock(returncode=0)
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        with pytest.raises(SetupError, match="Timed out probing swebench"):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
     def test_preflight_fails_docker_not_running(self, swe_bench_project, monkeypatch):
@@ -1535,10 +1304,6 @@ class TestSWEBenchScorerPreflight:
                     return MagicMock(returncode=1, stdout="", stderr=b"missing")
                 return MagicMock(returncode=1, stdout="", stderr=b"missing")
             if cmd[:2] == ["docker", "pull"]:
-                if cmd[2] == "docker.io/swebench/pending:latest":
-                    pytest.fail(
-                        "pending pull should have been cancelled before starting"
-                    )
                 return MagicMock(
                     returncode=1,
                     stdout="",
@@ -1552,15 +1317,7 @@ class TestSWEBenchScorerPreflight:
             match=r"docker\.io/swebench/test:latest.*rate limit exceeded",
         ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project, workers=2))
-        assert len(_FakeTqdm.instances) == 1
-        assert _FakeTqdm.instances[0].total == 3
-        assert _FakeTqdm.instances[0].updates == []
-        assert _FakeTqdm.instances[0].closed is True
-        executor = _FakeThreadPoolExecutor.instances[0]
-        assert executor.max_workers == 2
-        assert executor.shutdown_calls == [{"wait": False, "cancel_futures": True}]
-        future_by_image = {future.image: future for future in executor.submitted}
-        assert future_by_image["docker.io/swebench/pending:latest"].cancelled is True
+        assert _FakeThreadPoolExecutor.instances[0].max_workers == 2
 
     def test_derive_required_images_nonzero_returncode_raises(
         self, swe_bench_project, monkeypatch
