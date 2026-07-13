@@ -578,6 +578,22 @@ class TestAccuracyOnlyDataset:
             _load_datasets(config, tmp_path, TestMode.PERF)
 
     @pytest.mark.unit
+    def test_swe_bench_with_preset_suffix_as_perf_raises(self, tmp_path):
+        fake_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "problem_statement": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"name": "swe_bench::verified"}],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_df),
+            pytest.raises(InputValidationError, match="accuracy-only"),
+        ):
+            _load_datasets(config, tmp_path, TestMode.PERF)
+
+    @pytest.mark.unit
     def test_preflight_error_propagates(self, tmp_path):
         """A scorer whose preflight() raises SetupError must stop _load_datasets."""
         dummy_jsonl = tmp_path / "dummy.jsonl"

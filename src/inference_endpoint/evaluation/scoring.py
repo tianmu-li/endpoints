@@ -1784,77 +1784,9 @@ _DEFAULT_SWE_BENCH_TEMPLATE = (
     Path(__file__).resolve().parents[3]
     / "examples"
     / "10_Agentic_Inference"
+    / "accuracy"
     / "swebench_template.yaml"
 )
-
-
-def _read_swebench_exit_statuses(
-    output_dir: Path, ignore: frozenset[Path]
-) -> dict[str, list[str]]:
-    """Read the newest exit_statuses_*.yaml not in *ignore*; return {} if none present."""
-    files = [
-        f for f in sorted(output_dir.glob("exit_statuses_*.yaml")) if f not in ignore
-    ]
-    if not files:
-        return {}
-    try:
-        data = yaml.safe_load(files[-1].read_text()) or {}
-        return data.get("instances_by_exit_status", {})
-    except Exception:
-        logger.debug(
-            "Could not read %s for progress reporting", files[-1], exc_info=True
-        )
-        return {}
-
-
-def _poll_swebench_progress(
-    output_dir: Path, total: int, stop: threading.Event
-) -> None:
-    """Poll exit_statuses_*.yaml and update a tqdm bar until stop is set."""
-    existing = frozenset(output_dir.glob("exit_statuses_*.yaml"))
-    with tqdm(total=total, desc="SWE-bench instances", unit="instance") as bar:
-        last = 0
-        while not stop.is_set():
-            statuses = _read_swebench_exit_statuses(output_dir, existing)
-            done = sum(len(v) for v in statuses.values())
-            if done > last:
-                bar.update(done - last)
-                last = done
-            if statuses:
-                bar.set_postfix({k: len(v) for k, v in sorted(statuses.items())})
-            if last >= total:
-                break
-            stop.wait(timeout=5.0)
-        statuses = _read_swebench_exit_statuses(output_dir, existing)
-        done = sum(len(v) for v in statuses.values())
-        if done > last:
-            bar.update(done - last)
-        if statuses:
-            bar.set_postfix({k: len(v) for k, v in sorted(statuses.items())})
-
-
-def _decode_subprocess_stderr(stderr: bytes | str | None) -> str:
-    if stderr is None:
-        return ""
-    if isinstance(stderr, bytes):
-        return stderr.decode(errors="replace").strip()
-    return str(stderr).strip()
-
-
-def _extract_json_array_from_mixed_output(stdout: str) -> list[Any] | None:
-    """Return the last valid JSON array found in mixed stdout, or None."""
-    decoder = json.JSONDecoder()
-    matches: list[list[Any]] = []
-    for idx, char in enumerate(stdout):
-        if char != "[":
-            continue
-        try:
-            value, _ = decoder.raw_decode(stdout[idx:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, list):
-            matches.append(value)
-    return matches[-1] if matches else None
 
 
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
@@ -1879,6 +1811,79 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         "actions_toolcall.py": "minisweagent/models/utils/actions_toolcall.py",
         "litellm_model.py": "minisweagent/models/litellm_model.py",
     }
+
+    @staticmethod
+    def _read_swebench_exit_statuses(
+        output_dir: Path, ignore: frozenset[Path]
+    ) -> dict[str, list[str]]:
+        """Read the newest exit_statuses_*.yaml not in *ignore*; return {} if none present."""
+        files = [
+            f
+            for f in sorted(output_dir.glob("exit_statuses_*.yaml"))
+            if f not in ignore
+        ]
+        if not files:
+            return {}
+        try:
+            data = yaml.safe_load(files[-1].read_text()) or {}
+            return data.get("instances_by_exit_status", {})
+        except Exception:
+            logger.debug(
+                "Could not read %s for progress reporting", files[-1], exc_info=True
+            )
+            return {}
+
+    @staticmethod
+    def _poll_swebench_progress(
+        output_dir: Path, total: int, stop: threading.Event
+    ) -> None:
+        """Poll exit_statuses_*.yaml and update a tqdm bar until stop is set."""
+        existing = frozenset(output_dir.glob("exit_statuses_*.yaml"))
+        with tqdm(total=total, desc="SWE-bench instances", unit="instance") as bar:
+            last = 0
+            while not stop.is_set():
+                statuses = SWEBenchScorer._read_swebench_exit_statuses(
+                    output_dir, existing
+                )
+                done = sum(len(v) for v in statuses.values())
+                if done > last:
+                    bar.update(done - last)
+                    last = done
+                if statuses:
+                    bar.set_postfix({k: len(v) for k, v in sorted(statuses.items())})
+                if last >= total:
+                    break
+                stop.wait(timeout=5.0)
+            statuses = SWEBenchScorer._read_swebench_exit_statuses(output_dir, existing)
+            done = sum(len(v) for v in statuses.values())
+            if done > last:
+                bar.update(done - last)
+            if statuses:
+                bar.set_postfix({k: len(v) for k, v in sorted(statuses.items())})
+
+    @staticmethod
+    def _decode_subprocess_stderr(stderr: bytes | str | None) -> str:
+        if stderr is None:
+            return ""
+        if isinstance(stderr, bytes):
+            return stderr.decode(errors="replace").strip()
+        return str(stderr).strip()
+
+    @staticmethod
+    def _extract_json_array_from_mixed_output(stdout: str) -> list[Any] | None:
+        """Return the last valid JSON array found in mixed stdout, or None."""
+        decoder = json.JSONDecoder()
+        matches: list[list[Any]] = []
+        for idx, char in enumerate(stdout):
+            if char != "[":
+                continue
+            try:
+                value, _ = decoder.raw_decode(stdout[idx:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, list):
+                matches.append(value)
+        return matches[-1] if matches else None
 
     def __init__(
         self,
@@ -1953,7 +1958,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     def _get_extra_int(
         cls, extras: dict[str, Any], key: str, *, default: int, min_value: int = 0
     ) -> int:
-        value = extras.get(key, default)
+        value = extras.get(key)
+        if value is None:
+            value = default
         try:
             parsed = int(value)
         except (TypeError, ValueError) as exc:
@@ -1970,7 +1977,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     def _get_extra_bool(
         cls, extras: dict[str, Any], key: str, *, default: bool = False
     ) -> bool:
-        value = extras.get(key, default)
+        value = extras.get(key)
+        if value is None:
+            value = default
         if isinstance(value, bool):
             return value
         if isinstance(value, int) and value in (0, 1):
@@ -2121,13 +2130,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"accuracy subproject at {swe_bench_project_path}"
             ) from exc
         if result.returncode != 0:
-            stderr_text = _decode_subprocess_stderr(result.stderr)
+            stderr_text = cls._decode_subprocess_stderr(result.stderr)
             raise SetupError(
                 "Failed to derive required SWE-bench Docker images from the accuracy "
                 f"subproject at {swe_bench_project_path}"
                 + (f". stderr: {stderr_text}" if stderr_text else "")
             )
-        images = _extract_json_array_from_mixed_output(result.stdout or "")
+        images = cls._extract_json_array_from_mixed_output(result.stdout or "")
         if images is None:
             stdout_text = (result.stdout or "").strip()
             raise SetupError(
@@ -2170,7 +2179,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"Timed out pulling SWE-bench Docker image {image}"
             ) from exc
         if pull_result.returncode != 0:
-            stderr_text = _decode_subprocess_stderr(pull_result.stderr)
+            stderr_text = cls._decode_subprocess_stderr(pull_result.stderr)
             raise SetupError(
                 "Failed to pre-pull required SWE-bench Docker image "
                 f"{image}. Authenticate to Docker Hub with `docker login` "
@@ -2247,7 +2256,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             env=_uv_subproject_env(swe_bench_project_path),
         )
         if result.returncode != 0:
-            stderr_text = _decode_subprocess_stderr(result.stderr)
+            stderr_text = cls._decode_subprocess_stderr(result.stderr)
             raise SetupError(
                 f"mini-extra is not available in the SWE-bench subproject at "
                 f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
@@ -2270,7 +2279,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             env=_uv_subproject_env(swe_bench_project_path),
         )
         if swebench_result.returncode != 0:
-            stderr_text = _decode_subprocess_stderr(swebench_result.stderr)
+            stderr_text = cls._decode_subprocess_stderr(swebench_result.stderr)
             raise SetupError(
                 f"swebench is not available in the SWE-bench subproject at "
                 f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
@@ -2523,7 +2532,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         total_instances = min(self.num_instances, n_rows)
         stop_event = threading.Event()
         poll_thread = threading.Thread(
-            target=_poll_swebench_progress,
+            target=SWEBenchScorer._poll_swebench_progress,
             args=(output_dir, total_instances, stop_event),
             daemon=True,
         )
