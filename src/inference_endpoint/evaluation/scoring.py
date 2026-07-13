@@ -2241,20 +2241,26 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "curl -LsSf https://astral.sh/uv/install.sh | sh"
             )
 
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(swe_bench_project_path),
-                "mini-extra",
-                "--help",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            env=_uv_subproject_env(swe_bench_project_path),
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(swe_bench_project_path),
+                    "mini-extra",
+                    "--help",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                env=_uv_subproject_env(swe_bench_project_path),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(
+                "Timed out probing mini-extra in the SWE-bench subproject at "
+                f"{swe_bench_project_path}"
+            ) from exc
         if result.returncode != 0:
             stderr_text = cls._decode_subprocess_stderr(result.stderr)
             raise SetupError(
@@ -2263,21 +2269,27 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 + (f". stderr: {stderr_text}" if stderr_text else "")
             )
 
-        swebench_result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(swe_bench_project_path),
-                "python",
-                "-c",
-                "import swebench",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            env=_uv_subproject_env(swe_bench_project_path),
-        )
+        try:
+            swebench_result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(swe_bench_project_path),
+                    "python",
+                    "-c",
+                    "import swebench",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                env=_uv_subproject_env(swe_bench_project_path),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(
+                "Timed out probing swebench in the SWE-bench subproject at "
+                f"{swe_bench_project_path}"
+            ) from exc
         if swebench_result.returncode != 0:
             stderr_text = cls._decode_subprocess_stderr(swebench_result.stderr)
             raise SetupError(
@@ -2320,21 +2332,27 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @classmethod
     def _resolve_minisweagent_site_packages(cls, swe_bench_project_path: Path) -> Path:
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "--project",
-                str(swe_bench_project_path),
-                "python",
-                "-c",
-                "import minisweagent.models.utils.actions_toolcall as m; print(m.__file__)",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=_uv_subproject_env(swe_bench_project_path),
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--project",
+                    str(swe_bench_project_path),
+                    "python",
+                    "-c",
+                    "import minisweagent.models.utils.actions_toolcall as m; print(m.__file__)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=_uv_subproject_env(swe_bench_project_path),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(
+                "Timed out locating minisweagent install in the SWE-bench subproject "
+                f"at {swe_bench_project_path}"
+            ) from exc
         if result.returncode != 0:
             raise SetupError(
                 "Could not locate minisweagent install: " + result.stderr.strip()
