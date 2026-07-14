@@ -26,3 +26,5 @@ class ServiceConfig:
     artifact_root: Path = Path("swebench_service_artifacts")
     max_concurrent_runs: int = 1
     subprocess_timeout_s: int = 24 * 60 * 60
+    auth_token: str | None = None
+    max_stored_runs: int = 100

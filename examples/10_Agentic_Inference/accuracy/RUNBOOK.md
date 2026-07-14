@@ -42,12 +42,17 @@ which skips accuracy datasets.
 Scorer preflight calls the service `/health` endpoint. It does not check Docker
 or pre-pull images on the benchmark client.
 
+The service is trusted infrastructure. It receives endpoint URLs and optional
+endpoint credentials, runs Docker-backed evaluations, and serves artifacts. For
+non-loopback deployments, bind it on a private network or start it with
+`--auth-token TOKEN` and set
+`accuracy_config.extras.swebench_service_auth_token: TOKEN`.
+
 Qwen SWE-bench configs may opt into `enable_swebench_toolcall_patch: true` and
-the `swebench_qwen_tools_template.yaml` template. That path builds a temporary
-minisweagent package overlay with the replacement files shipped in this
-subproject, prepends it to `PYTHONPATH` for the agent run, and leaves the
-installed package untouched. Leave this flag unset for Kimi and other non-Qwen
-runs.
+`swebench_template: qwen_tools`. That path builds a temporary minisweagent
+package overlay with replacement files packaged with the service, prepends it to
+`PYTHONPATH` for the agent run, and leaves the installed package untouched.
+Leave this flag unset for Kimi and other non-Qwen runs.
 
 ## Common failure modes
 

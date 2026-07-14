@@ -210,12 +210,20 @@ evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
 
 `accuracy_config.extras.swebench_service_url` points the benchmark client to
 the service. Endpoint URLs in `endpoint_config.endpoints` must be reachable from
-the service host.
+the service host. Treat the service host as trusted infrastructure: it receives
+the endpoint URLs and optional endpoint API key needed to run mini-swe-agent.
+For non-loopback service deployments, bind it on a private network or start it
+with `--auth-token` and set
+`accuracy_config.extras.swebench_service_auth_token`.
 
 `accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`).
 If unset, it defaults to the load pattern's `target_concurrency` (for
 `concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers`
 (default 10, `--max_workers`) sets the eval harness's parallelism.
+
+Qwen tool-call runs should set `enable_swebench_toolcall_patch: true` and
+`swebench_template: qwen_tools`. Template contents are owned by the service; the
+client does not send host file paths for templates or patch code.
 
 Start the service on the host that has Docker:
 

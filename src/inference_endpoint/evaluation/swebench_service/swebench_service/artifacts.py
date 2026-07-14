@@ -15,10 +15,31 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
-SECRET_KEY_NAMES = {"api_key", "authorization", "access_token", "secret_key"}
+SECRET_KEY_NAMES = {
+    "api-key",
+    "api_key",
+    "authorization",
+    "access-token",
+    "access_token",
+    "endpoint-api-key",
+    "endpoint_api_key",
+    "password",
+    "secret",
+    "secret-key",
+    "secret_key",
+    "token",
+    "x-api-key",
+    "x_api_key",
+}
+SECRET_TEXT_PATTERNS = (
+    re.compile(r"(?i)(authorization:\s*(?:bearer|basic)\s+)[^\s,;]+"),
+    re.compile(r"(?i)((?:api[_-]?key|access[_-]?token|token|password)=)[^&\s]+"),
+    re.compile(r"(://[^:/\s]+:)[^@\s/]+(@)"),
+)
 SAFE_ARTIFACT_NAMES = {
     "preds.json",
     "swe_bench_agent.log",
@@ -28,18 +49,47 @@ SAFE_ARTIFACT_NAMES = {
 }
 
 
-def redact_secrets(value: Any) -> Any:
+def _is_secret_key(key: Any) -> bool:
+    normalized = str(key).strip().lower()
+    if normalized in SECRET_KEY_NAMES:
+        return True
+    compact = normalized.replace("-", "_")
+    return (
+        compact.endswith("_key")
+        or compact.endswith("_token")
+        or "api_key" in compact
+        or "access_token" in compact
+        or "secret" in compact
+        or "password" in compact
+    )
+
+
+def redact_text(text: str, secret_values: set[str] | None = None) -> str:
+    redacted = text
+    for secret in secret_values or set():
+        if len(secret) >= 4:
+            redacted = redacted.replace(secret, "<redacted>")
+    for pattern in SECRET_TEXT_PATTERNS:
+        if pattern.pattern.startswith("(://"):
+            redacted = pattern.sub(r"\1<redacted>\2", redacted)
+        else:
+            redacted = pattern.sub(r"\1<redacted>", redacted)
+    return redacted
+
+
+def redact_secrets(value: Any, *, secret_values: set[str] | None = None) -> Any:
     if isinstance(value, dict):
-        return {
-            key: (
-                "<redacted>"
-                if str(key).lower() in SECRET_KEY_NAMES
-                else redact_secrets(val)
-            )
-            for key, val in value.items()
-        }
+        redacted = {}
+        for key, val in value.items():
+            if _is_secret_key(key):
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = redact_secrets(val, secret_values=secret_values)
+        return redacted
     if isinstance(value, list):
-        return [redact_secrets(item) for item in value]
+        return [redact_secrets(item, secret_values=secret_values) for item in value]
+    if isinstance(value, str):
+        return redact_text(value, secret_values)
     return value
 
 

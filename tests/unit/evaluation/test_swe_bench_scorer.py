@@ -95,10 +95,10 @@ class TestSWEBenchScorerRegistration:
 
 class TestSWEBenchScorerPreflight:
     def test_preflight_calls_health(self, monkeypatch):
-        calls: list[tuple[str, str]] = []
+        calls: list[tuple[str, str, str | None]] = []
 
         def fake_http_json(url, *, method="GET", **kwargs):
-            calls.append((url, method))
+            calls.append((url, method, kwargs.get("auth_token")))
             return {
                 "api_version": "v1",
                 "capabilities": ["swebench.run", "artifacts.download"],
@@ -109,12 +109,13 @@ class TestSWEBenchScorerPreflight:
         SWEBenchScorer.preflight(
             {
                 "swebench_service_url": "http://service-host:18080",
+                "swebench_service_auth_token": "tok",
                 "subset": "lite",
                 "num_instances": 1,
             }
         )
 
-        assert calls == [("http://service-host:18080/health", "GET")]
+        assert calls == [("http://service-host:18080/health", "GET", "tok")]
 
     def test_preflight_never_calls_docker_or_subprocess(self, monkeypatch):
         def fail_run(*args, **kwargs):
@@ -196,10 +197,11 @@ class TestSWEBenchScorerScore:
             "repo__repo-1",
             "repo__repo-2",
         ]
-        assert (
-            payloads[0]["benchmark_config"]["endpoint_config"]["api_key"]
-            == "secret-key"
-        )
+        assert "benchmark_config" not in payloads[0]
+        assert payloads[0]["endpoint_urls"] == ["http://endpoint-host:30000"]
+        assert payloads[0]["endpoint_api_key"] == "secret-key"
+        assert payloads[0]["generation_params"] == {}
+        assert payloads[0]["template"] == "default"
         assert (report_dir / "swe_bench_results.json").exists()
 
     def test_score_polls_until_terminal(self, report_dir, monkeypatch):
@@ -267,6 +269,38 @@ class TestSWEBenchScorerScore:
         assert scorer.complete is False
         SWEBenchScorer._http_json.assert_not_called()
 
+    def test_partial_submission_marks_incomplete(self, report_dir, monkeypatch):
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            return {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "result": {"resolved_instances": 1, "submitted_instances": 2},
+                "artifacts": [],
+            }
+
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        scorer = _make_scorer(report_dir)
+
+        score, _ = scorer.score()
+
+        assert score == pytest.approx(1 / 3)
+        assert scorer.complete is False
+
+    def test_unsafe_artifact_url_is_not_downloaded(self, report_dir, monkeypatch):
+        def fail_urlopen(*args, **kwargs):
+            pytest.fail("unsafe artifact URL must not be fetched")
+
+        monkeypatch.setattr(scoring_mod.urllib_request, "urlopen", fail_urlopen)
+
+        SWEBenchScorer._download_artifact(
+            "http://service-host:18080/",
+            {"name": "preds.json", "url": "http://evil/preds.json"},
+            report_dir,
+            "run-1",
+        )
+
+        assert not (report_dir / "preds.json").exists()
+
     def test_artifact_result_fallback(self, report_dir, monkeypatch):
         result_path = report_dir / "swe_bench_results.json"
 
@@ -274,10 +308,15 @@ class TestSWEBenchScorerScore:
             return {
                 "run_id": "run-1",
                 "status": "succeeded",
-                "artifacts": [{"name": "swe_bench_results.json", "url": "/artifact"}],
+                "artifacts": [
+                    {
+                        "name": "swe_bench_results.json",
+                        "url": "/v1/runs/run-1/artifacts/swe_bench_results.json",
+                    }
+                ],
             }
 
-        def fake_download(service_url, status, output_dir):
+        def fake_download(service_url, status, output_dir, auth_token=None):
             result_path.write_text(
                 json.dumps({"resolved_instances": 1, "submitted_instances": 3})
             )

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import msgspec
 import msgspec.json
@@ -1749,6 +1749,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         "status.json",
     }
     TOOLCALL_PATCH_EXTRA: ClassVar[str] = "enable_swebench_toolcall_patch"
+    SERVICE_TEMPLATES: ClassVar[set[str]] = {"default", "qwen_tools"}
 
     def __init__(
         self,
@@ -1758,13 +1759,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         extractor: type[Extractor] | None = None,
         ground_truth_column: str | None = "instance_id",
         swebench_service_url: str | None = None,
+        swebench_service_auth_token: str | None = None,
         subset: str = "verified",
         split: str = "test",
         num_instances: int = 100,
         workers: int = 10,
         max_eval_workers: int = 10,
         enable_swebench_toolcall_patch: bool = False,
-        swebench_config_template: str | None = None,
+        swebench_template: str | None = None,
         service_timeout_s: int | None = None,
         poll_interval_s: float | None = None,
     ):
@@ -1780,25 +1782,27 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         options = self._resolve_options(
             {
                 "swebench_service_url": swebench_service_url,
+                "swebench_service_auth_token": swebench_service_auth_token,
                 "subset": subset,
                 "split": split,
                 "num_instances": num_instances,
                 "workers": workers,
                 "max_eval_workers": max_eval_workers,
                 self.TOOLCALL_PATCH_EXTRA: enable_swebench_toolcall_patch,
-                "swebench_config_template": swebench_config_template,
+                "swebench_template": swebench_template,
                 "service_timeout_s": service_timeout_s,
                 "poll_interval_s": poll_interval_s,
             }
         )
         self.swebench_service_url = options["swebench_service_url"]
+        self.swebench_service_auth_token = options["swebench_service_auth_token"]
         self.subset = options["subset"]
         self.split = options["split"]
         self.num_instances = options["num_instances"]
         self.workers = options["workers"]
         self.max_eval_workers = options["max_eval_workers"]
         self.enable_swebench_toolcall_patch = options[self.TOOLCALL_PATCH_EXTRA]
-        self.swebench_config_template = options["swebench_config_template"]
+        self.swebench_template = options["swebench_template"]
         self.service_timeout_s = options["service_timeout_s"]
         self.poll_interval_s = options["poll_interval_s"]
 
@@ -1819,9 +1823,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         method: str = "GET",
         payload: dict[str, Any] | None = None,
         timeout_s: float = 30.0,
+        auth_token: str | None = None,
     ) -> dict[str, Any]:
         data = None
         headers = {"Accept": "application/json"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
         if payload is not None:
             data = msgspec.json.encode(payload)
             headers["Content-Type"] = "application/json"
@@ -1848,8 +1855,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         return decoded
 
     @classmethod
-    def _check_health(cls, service_url: str) -> dict[str, Any]:
-        health = cls._http_json(urljoin(service_url, "health"), timeout_s=10.0)
+    def _check_health(
+        cls, service_url: str, auth_token: str | None = None
+    ) -> dict[str, Any]:
+        health = cls._http_json(
+            urljoin(service_url, "health"),
+            timeout_s=10.0,
+            auth_token=auth_token,
+        )
         api_version = health.get("api_version")
         if api_version != cls.SERVICE_API_VERSION:
             raise SetupError(
@@ -1871,16 +1884,32 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         service_url: str,
         artifact: dict[str, Any],
         report_dir: Path,
+        run_id: str,
+        auth_token: str | None = None,
     ) -> None:
         name = str(artifact.get("name") or "")
         href = str(artifact.get("url") or "")
         if name not in cls.SAFE_ARTIFACT_NAMES or not href:
+            return
+        parsed = urlparse(href)
+        expected_path = f"/v1/runs/{run_id}/artifacts/{name}"
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+            or parsed.path != expected_path
+        ):
+            logger.warning("Ignoring unsafe SWE-bench artifact URL for %s", name)
             return
         target = report_dir / name
         url = urljoin(service_url, href.lstrip("/"))
         req = urllib_request.Request(
             url, headers={"Accept": "application/octet-stream"}
         )
+        if auth_token:
+            req.add_header("Authorization", f"Bearer {auth_token}")
         try:
             with urllib_request.urlopen(req, timeout=60.0) as resp:
                 target.write_bytes(resp.read())
@@ -1891,8 +1920,15 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @classmethod
     def _download_artifacts(
-        cls, service_url: str, status: dict[str, Any], report_dir: Path
+        cls,
+        service_url: str,
+        status: dict[str, Any],
+        report_dir: Path,
+        auth_token: str | None = None,
     ) -> None:
+        run_id = str(status.get("run_id") or "")
+        if not run_id:
+            return
         artifacts = status.get("artifacts") or []
         if isinstance(artifacts, dict):
             artifacts = [
@@ -1904,7 +1940,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             return
         for artifact in artifacts:
             if isinstance(artifact, dict):
-                cls._download_artifact(service_url, artifact, report_dir)
+                cls._download_artifact(
+                    service_url, artifact, report_dir, run_id, auth_token
+                )
 
     @staticmethod
     def _write_service_status(report_dir: Path, status: dict[str, Any]) -> None:
@@ -1974,10 +2012,31 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         }
 
     @classmethod
+    def _resolve_service_template(cls, extras: dict[str, Any]) -> str:
+        raw = extras.get("swebench_template")
+        if raw is None:
+            raw = (
+                "qwen_tools"
+                if cls._get_extra_bool(extras, cls.TOOLCALL_PATCH_EXTRA)
+                else "default"
+            )
+        template = str(raw)
+        if template not in cls.SERVICE_TEMPLATES:
+            raise SetupError(
+                "accuracy_config.extras.swebench_template must be one of "
+                f"{sorted(cls.SERVICE_TEMPLATES)}; got {template!r}"
+            )
+        return template
+
+    @classmethod
     def _resolve_options(cls, extras: dict[str, Any]) -> dict[str, Any]:
         options: dict[str, Any] = cls._resolve_dataset_options(extras)
         options["swebench_service_url"] = cls._normalize_service_url(
             extras.get("swebench_service_url")
+        )
+        auth_token = extras.get("swebench_service_auth_token")
+        options["swebench_service_auth_token"] = (
+            str(auth_token) if auth_token not in (None, "") else None
         )
         options["num_instances"] = cls._get_extra_int(
             extras,
@@ -2001,7 +2060,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             extras,
             cls.TOOLCALL_PATCH_EXTRA,
         )
-        options["swebench_config_template"] = extras.get("swebench_config_template")
+        options["swebench_template"] = cls._resolve_service_template(extras)
         options["service_timeout_s"] = cls._get_extra_int(
             extras,
             "service_timeout_s",
@@ -2020,6 +2079,20 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             raise SetupError("accuracy_config.extras.poll_interval_s must be > 0")
         options["poll_interval_s"] = poll_interval
         return options
+
+    @staticmethod
+    def _generation_params(model_params: dict[str, Any]) -> dict[str, Any]:
+        fields = (
+            "temperature",
+            "top_p",
+            "top_k",
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "max_new_tokens",
+            "chat_template_kwargs",
+        )
+        return {field: model_params[field] for field in fields if field in model_params}
 
     @classmethod
     def dataset_loader_kwargs(cls, extras: dict[str, Any]) -> dict[str, Any]:
@@ -2043,7 +2116,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             options = cls._resolve_options(extras)
         except ValueError as exc:
             raise SetupError(str(exc)) from exc
-        cls._check_health(options["swebench_service_url"])
+        cls._check_health(
+            options["swebench_service_url"],
+            options["swebench_service_auth_token"],
+        )
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -2098,9 +2174,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             self.complete = False
             return None, 1
 
+        endpoint_config = benchmark_cfg.get("endpoint_config") or {}
+        endpoint_urls = endpoint_config.get("endpoints") or []
         payload: dict[str, Any] = {
-            "benchmark_config": benchmark_cfg,
             "model_name": model_name,
+            "endpoint_urls": endpoint_urls,
+            "endpoint_api_key": endpoint_config.get("api_key"),
+            "generation_params": self._generation_params(model_params),
             "subset": self.subset,
             "split": self.split,
             "num_instances": total_instances,
@@ -2108,9 +2188,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "max_eval_workers": self.max_eval_workers,
             "evaluated_instance_ids": evaluated_instance_ids,
             self.TOOLCALL_PATCH_EXTRA: self.enable_swebench_toolcall_patch,
+            "template": self.swebench_template,
         }
-        if self.swebench_config_template:
-            payload["swebench_config_template"] = self.swebench_config_template
 
         try:
             submitted = type(self)._http_json(
@@ -2118,6 +2197,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 method="POST",
                 payload=payload,
                 timeout_s=30.0,
+                auth_token=self.swebench_service_auth_token,
             )
             run_id = str(submitted.get("run_id") or "")
             if not run_id:
@@ -2136,6 +2216,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 status = type(self)._http_json(
                     urljoin(self.swebench_service_url, f"v1/runs/{run_id}"),
                     timeout_s=30.0,
+                    auth_token=self.swebench_service_auth_token,
                 )
         except SetupError:
             logger.error("SWE-bench service run failed", exc_info=True)
@@ -2144,7 +2225,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         type(self)._write_service_status(self.report_dir, status)
         type(self)._download_artifacts(
-            self.swebench_service_url, status, self.report_dir
+            self.swebench_service_url,
+            status,
+            self.report_dir,
+            self.swebench_service_auth_token,
         )
         if status.get("status") != "succeeded":
             logger.error(
@@ -2184,6 +2268,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
             self.complete = False
             return None, 1
+        if submitted_count != denominator:
+            logger.warning(
+                "SWE-bench: service submitted %d / %d evaluated instances; "
+                "marking score incomplete",
+                submitted_count,
+                denominator,
+            )
+            self.complete = False
 
         resolved_rate = resolved / denominator
         logger.info(

@@ -46,11 +46,10 @@ class FakeRunner:
 
 def _payload() -> dict:
     return {
-        "benchmark_config": {
-            "model_params": {"name": "test-model"},
-            "endpoint_config": {"endpoints": ["http://endpoint"], "api_key": "secret"},
-        },
         "model_name": "test-model",
+        "endpoint_urls": ["http://endpoint"],
+        "endpoint_api_key": "secret",
+        "generation_params": {"temperature": 0.0},
         "subset": "lite",
         "split": "test",
         "num_instances": 1,
@@ -63,6 +62,16 @@ def _payload() -> dict:
 async def _client(tmp_path: Path, runner) -> TestClient:
     app = create_app(
         ServiceConfig(artifact_root=tmp_path, max_concurrent_runs=1),
+        runner=runner,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    return client
+
+
+async def _auth_client(tmp_path: Path, runner) -> TestClient:
+    app = create_app(
+        ServiceConfig(artifact_root=tmp_path, max_concurrent_runs=1, auth_token="tok"),
         runner=runner,
     )
     client = TestClient(TestServer(app))
@@ -94,6 +103,21 @@ async def test_post_run_validates_requests(tmp_path):
         await client.close()
 
     assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_optional_auth_token_is_enforced(tmp_path):
+    client = await _auth_client(tmp_path, FakeRunner())
+    try:
+        unauthorized = await client.get("/health")
+        authorized = await client.get(
+            "/health", headers={"Authorization": "Bearer tok"}
+        )
+    finally:
+        await client.close()
+
+    assert unauthorized.status == 401
+    assert authorized.status == 200
 
 
 @pytest.mark.asyncio
@@ -192,3 +216,26 @@ async def test_status_redacts_api_keys(tmp_path):
     assert "secret" not in request_text
     assert "<redacted>" in request_text
     assert "secret" not in status_text
+
+
+@pytest.mark.asyncio
+async def test_failed_status_redacts_secret_values(tmp_path):
+    class SecretFailRunner:
+        def run(self, request, run_dir: Path):
+            raise RuntimeError(f"failed with api_key={request.endpoint_api_key}")
+
+    client = await _client(tmp_path, SecretFailRunner())
+    try:
+        submit = await client.post("/v1/runs", json=_payload())
+        submitted = await submit.json()
+        for _ in range(20):
+            status_resp = await client.get(f"/v1/runs/{submitted['run_id']}")
+            status = await status_resp.json()
+            if status["status"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await client.close()
+
+    assert "secret" not in status["error"]
+    assert "<redacted>" in status["error"]

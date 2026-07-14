@@ -31,6 +31,8 @@ def main() -> None:
     parser.add_argument("--artifact-root", default="swebench_service_artifacts")
     parser.add_argument("--max-concurrent-runs", type=int, default=1)
     parser.add_argument("--subprocess-timeout-s", type=int, default=24 * 60 * 60)
+    parser.add_argument("--auth-token")
+    parser.add_argument("--max-stored-runs", type=int, default=100)
     args = parser.parse_args()
 
     config = ServiceConfig(
@@ -39,6 +41,8 @@ def main() -> None:
         artifact_root=Path(args.artifact_root),
         max_concurrent_runs=args.max_concurrent_runs,
         subprocess_timeout_s=args.subprocess_timeout_s,
+        auth_token=args.auth_token,
+        max_stored_runs=args.max_stored_runs,
     )
     web.run_app(create_app(config), host=config.host, port=config.port)
 

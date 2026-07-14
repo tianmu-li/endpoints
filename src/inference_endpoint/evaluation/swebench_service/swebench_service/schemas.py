@@ -17,14 +17,19 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 RunState = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+TemplateName = Literal["default", "qwen_tools"]
 
 
 class RunRequest(BaseModel):
-    benchmark_config: dict[str, Any]
+    model_config = ConfigDict(extra="forbid")
+
     model_name: str = Field(min_length=1)
+    endpoint_urls: list[str] = Field(min_length=1)
+    endpoint_api_key: str | None = None
+    generation_params: dict[str, Any] = Field(default_factory=dict)
     subset: str = "verified"
     split: str = "test"
     num_instances: int = Field(ge=1)
@@ -32,7 +37,7 @@ class RunRequest(BaseModel):
     max_eval_workers: int = Field(ge=1)
     evaluated_instance_ids: list[str] = Field(min_length=1)
     enable_swebench_toolcall_patch: bool = False
-    swebench_config_template: str | None = None
+    template: TemplateName = "default"
 
 
 class ArtifactInfo(BaseModel):

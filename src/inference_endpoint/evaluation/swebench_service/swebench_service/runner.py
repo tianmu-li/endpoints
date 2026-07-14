@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,23 +30,17 @@ import msgspec.json
 import yaml
 
 from .artifacts import redact_secrets
-from .schemas import RunRequest
+from .schemas import RunRequest, TemplateName
 
 
 class RunnerError(RuntimeError):
     pass
 
 
-def _default_template() -> dict[str, Any]:
-    return {
-        "model": {
-            "model_name": "",
-            "model_kwargs": {
-                "custom_llm_provider": "openai",
-                "api_base": "",
-            },
-        }
-    }
+TEMPLATE_FILES: dict[TemplateName, str] = {
+    "default": "swebench_template.yaml",
+    "qwen_tools": "swebench_qwen_tools_template.yaml",
+}
 
 
 def _normalize_endpoint_base(endpoint: str) -> str:
@@ -59,6 +54,12 @@ def _normalize_endpoint_base(endpoint: str) -> str:
             netloc = f"{netloc}:{parsed.port}"
         base = urlunparse(parsed._replace(netloc=netloc))
     return base
+
+
+def _exact_instance_filter(instance_ids: list[str]) -> str:
+    return (
+        "^(?:" + "|".join(re.escape(instance_id) for instance_id in instance_ids) + ")$"
+    )
 
 
 def _run_subprocess(
@@ -111,8 +112,13 @@ class SwebenchRunner:
 
     def run(self, request: RunRequest, run_dir: Path) -> dict[str, Any]:
         run_dir.mkdir(parents=True, exist_ok=True)
+        secret_values = (
+            {request.endpoint_api_key} if request.endpoint_api_key else set()
+        )
         (run_dir / "request.json").write_bytes(
-            msgspec.json.encode(redact_secrets(request.model_dump()))
+            msgspec.json.encode(
+                redact_secrets(request.model_dump(), secret_values=secret_values)
+            )
         )
 
         output_dir = run_dir / "swe_bench_output"
@@ -122,13 +128,15 @@ class SwebenchRunner:
 
         with tempfile.TemporaryDirectory(prefix="swebench_config_") as config_tmp:
             patched_config = self._patch_config(
-                Path(config_tmp), request.benchmark_config, request
+                Path(config_tmp),
+                request,
             )
             self._run_agent(request, patched_config, output_dir, run_dir)
 
         preds_path = output_dir / "preds.json"
         if not preds_path.exists():
             raise RunnerError("mini-extra did not produce preds.json")
+        self._validate_prediction_ids(request, preds_path)
         shutil.copy2(preds_path, run_dir / "preds.json")
 
         result_path = self._run_eval(request, preds_path, output_dir, run_dir)
@@ -136,12 +144,9 @@ class SwebenchRunner:
         return msgspec.json.decode(result_path.read_bytes(), type=dict)
 
     def _load_template(self, request: RunRequest) -> dict[str, Any]:
-        if request.swebench_config_template:
-            template_path = self._resolve_service_path(request.swebench_config_template)
-            with template_path.open() as f:
-                loaded = yaml.safe_load(f)
-        else:
-            loaded = _default_template()
+        template_path = self._template_dir / TEMPLATE_FILES[request.template]
+        with template_path.open() as f:
+            loaded = yaml.safe_load(f)
         if not isinstance(loaded, dict):
             raise RunnerError("swebench template must be a YAML mapping")
         model_cfg = loaded.get("model")
@@ -151,27 +156,25 @@ class SwebenchRunner:
             raise RunnerError("swebench template must define model.model_kwargs")
         return loaded
 
-    def _patch_config(
-        self, config_dir: Path, benchmark_config: dict[str, Any], request: RunRequest
-    ) -> Path:
+    @property
+    def _template_dir(self) -> Path:
+        return Path(__file__).resolve().parent / "templates"
+
+    def _patch_config(self, config_dir: Path, request: RunRequest) -> Path:
         cfg = self._load_template(request)
         model_cfg = cfg["model"]
         model_kwargs = model_cfg["model_kwargs"]
-        model_params = benchmark_config.get("model_params") or {}
-        endpoint_cfg = benchmark_config.get("endpoint_config") or {}
-        endpoints = endpoint_cfg.get("endpoints", [])
 
         model_cfg["model_name"] = request.model_name
-        if endpoints:
-            base = _normalize_endpoint_base(str(endpoints[0]))
+        if request.endpoint_urls:
+            base = _normalize_endpoint_base(str(request.endpoint_urls[0]))
             model_kwargs["api_base"] = base + "/v1"
         else:
             base = ""
             model_kwargs["api_base"] = ""
 
-        api_key = endpoint_cfg.get("api_key")
-        if api_key:
-            model_kwargs["api_key"] = api_key
+        if request.endpoint_api_key:
+            model_kwargs["api_key"] = request.endpoint_api_key
         elif urlparse(base).hostname in {"localhost", "127.0.0.1", "::1"}:
             model_kwargs["api_key"] = "EMPTY"
         else:
@@ -185,18 +188,22 @@ class SwebenchRunner:
             "presence_penalty",
             "frequency_penalty",
         ):
-            val = model_params.get(field)
+            val = request.generation_params.get(field)
             if val is not None:
                 model_kwargs[field] = val
             else:
                 model_kwargs.pop(field, None)
 
-        if (max_new_tokens := model_params.get("max_new_tokens")) is not None:
+        if (
+            max_new_tokens := request.generation_params.get("max_new_tokens")
+        ) is not None:
             model_kwargs["max_tokens"] = max_new_tokens
         else:
             model_kwargs.pop("max_tokens", None)
 
-        if (chat_tmpl := model_params.get("chat_template_kwargs")) is not None:
+        if (
+            chat_tmpl := request.generation_params.get("chat_template_kwargs")
+        ) is not None:
             model_kwargs["chat_template_kwargs"] = chat_tmpl
         else:
             model_kwargs.pop("chat_template_kwargs", None)
@@ -207,15 +214,6 @@ class SwebenchRunner:
             yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
         return patched_path
 
-    def _resolve_service_path(self, raw: str) -> Path:
-        path = Path(raw).expanduser()
-        if path.is_absolute():
-            return path
-        project_candidate = self.project_root / path
-        if project_candidate.exists():
-            return project_candidate
-        return Path.cwd() / path
-
     def _run_agent(
         self,
         request: RunRequest,
@@ -223,7 +221,7 @@ class SwebenchRunner:
         output_dir: Path,
         run_dir: Path,
     ) -> None:
-        slice_str = f"0:{len(request.evaluated_instance_ids)}"
+        instance_filter = _exact_instance_filter(request.evaluated_instance_ids)
         cmd = [
             "mini-extra",
             "swebench",
@@ -235,8 +233,8 @@ class SwebenchRunner:
             request.subset,
             "--split",
             request.split,
-            "--slice",
-            slice_str,
+            "--filter",
+            instance_filter,
             "--workers",
             str(request.workers),
             "--output",
@@ -263,10 +261,8 @@ class SwebenchRunner:
 
     def _base_env(self, request: RunRequest) -> dict[str, str]:
         env = dict(os.environ)
-        endpoint_cfg = request.benchmark_config.get("endpoint_config") or {}
-        endpoints = endpoint_cfg.get("endpoints") or []
         no_proxy = {"127.0.0.1", "localhost"}
-        for endpoint in endpoints:
+        for endpoint in request.endpoint_urls:
             host = urlparse(str(endpoint)).hostname
             if host:
                 no_proxy.add(host)
@@ -282,12 +278,7 @@ class SwebenchRunner:
 
     def _agent_env(self, request: RunRequest, overlay_root: Path) -> dict[str, str]:
         env = self._base_env(request)
-        replacement_root = self.project_root
-        if request.swebench_config_template:
-            replacement_root = self._resolve_service_path(
-                request.swebench_config_template
-            ).parent
-        overlay = self._create_toolcall_patch_overlay(overlay_root, replacement_root)
+        overlay = self._create_toolcall_patch_overlay(overlay_root, self._template_dir)
         pythonpath = [str(overlay)]
         if existing := env.get("PYTHONPATH"):
             pythonpath.append(existing)
@@ -318,6 +309,20 @@ class SwebenchRunner:
                 )
             shutil.copy2(src, overlay_root / rel_dest)
         return overlay_root
+
+    def _validate_prediction_ids(self, request: RunRequest, preds_path: Path) -> None:
+        try:
+            preds = msgspec.json.decode(preds_path.read_bytes(), type=dict)
+        except msgspec.DecodeError as exc:
+            raise RunnerError("mini-extra produced invalid preds.json") from exc
+        expected = set(request.evaluated_instance_ids)
+        actual = {str(instance_id) for instance_id in preds}
+        unexpected = sorted(actual - expected)
+        if unexpected:
+            raise RunnerError(
+                "mini-extra produced predictions for unexpected SWE-bench "
+                f"instances: {', '.join(unexpected[:10])}"
+            )
 
     def _resolve_minisweagent_site_packages(self) -> Path:
         result = subprocess.run(
