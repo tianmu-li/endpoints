@@ -29,9 +29,12 @@ datasets:
       eval_method: "swe_bench_scorer"
       num_repeats: 1
       extras:
+        swebench_service_url: "http://localhost:18080"
         num_instances: 200
+        workers: 10
+        max_eval_workers: 10
         enable_swebench_toolcall_patch: true
-        swebench_config_template: "examples/10_Agentic_Inference/accuracy/swebench_qwen_tools_template.yaml"
+        swebench_template: "qwen_tools"
 
 settings:
   runtime:

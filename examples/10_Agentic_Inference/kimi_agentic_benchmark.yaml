@@ -29,6 +29,7 @@ datasets:
       eval_method: "swe_bench_scorer"
       num_repeats: 1
       extras:
+        swebench_service_url: "http://localhost:18080"
         num_instances: 200
         # workers: 8 # parallel agent workers; defaults to target_concurrency if unset.
 

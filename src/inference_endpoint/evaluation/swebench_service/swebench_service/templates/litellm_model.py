@@ -19,7 +19,7 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 import litellm
@@ -75,8 +75,9 @@ class LitellmModelConfig(BaseModel):
     """Model registry for cost tracking and model metadata. See the local model guide (https://mini-swe-agent.com/latest/models/local_models/) for more details."""
     set_cache_control: Literal["default_end"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
-    cost_tracking: Literal["default", "ignore_errors"] = os.getenv(
-        "MSWEA_COST_TRACKING", "default"
+    cost_tracking: Literal["default", "ignore_errors"] = cast(
+        Literal["default", "ignore_errors"],
+        os.getenv("MSWEA_COST_TRACKING", "default"),
     )
     """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""
     format_error_template: str = "{{ error }}"
@@ -97,7 +98,6 @@ class LitellmModel:
         litellm.exceptions.PermissionDeniedError,
         litellm.exceptions.ContextWindowExceededError,
         litellm.exceptions.AuthenticationError,
-        KeyboardInterrupt,
     ]
 
     def __init__(self, *, config_class: Callable = LitellmModelConfig, **kwargs):
