@@ -10,8 +10,10 @@ uv run --project src/inference_endpoint/evaluation/swebench_service \
   python -m swebench_service --host 0.0.0.0 --port 18080
 ```
 
-The endpoint URLs in the benchmark config must be reachable from the service
-host. Docker is required only on the service host.
+The endpoint URL in the benchmark config must be reachable from the service
+host. Service mode supports exactly one endpoint URL and follows the
+LiveCodeBench-style external-service convention for heavyweight evaluation work.
+Docker is required only on the service host.
 
 For non-loopback deployments, bind only on a private network or set
 `--auth-token TOKEN` and configure the client with:

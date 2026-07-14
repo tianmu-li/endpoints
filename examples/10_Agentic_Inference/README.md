@@ -209,9 +209,11 @@ evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
 `split` are used consistently for dataset loading, preflight, and scoring.
 
 `accuracy_config.extras.swebench_service_url` points the benchmark client to
-the service. Endpoint URLs in `endpoint_config.endpoints` must be reachable from
-the service host. Treat the service host as trusted infrastructure: it receives
-the endpoint URLs and optional endpoint API key needed to run mini-swe-agent.
+the service. Service mode follows the LiveCodeBench-style external-service
+convention for heavyweight evaluation work and supports exactly one endpoint URL
+in `endpoint_config.endpoints`; that URL must be reachable from the service
+host. Treat the service host as trusted infrastructure: it receives the endpoint
+URL and optional endpoint API key needed to run mini-swe-agent.
 For non-loopback service deployments, bind it on a private network or start it
 with `--auth-token` and set
 `accuracy_config.extras.swebench_service_auth_token`.

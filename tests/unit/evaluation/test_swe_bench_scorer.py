@@ -11,6 +11,8 @@ import msgspec
 import pandas as pd
 import pytest
 import yaml
+
+# isort: split
 from inference_endpoint.evaluation import scoring as scoring_mod
 from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
 from inference_endpoint.exceptions import SetupError
@@ -21,7 +23,35 @@ _DATASET_NAME = "swe_bench"
 _MODEL_NAME = "TestOrg/test-model-7b"
 
 
-def _write_benchmark_config(report_dir: Path, model_params: dict | None = None) -> None:
+class FakeTqdm:
+    instances: list["FakeTqdm"] = []
+
+    def __init__(self, *, total, desc, unit):
+        self.total = total
+        self.desc = desc
+        self.unit = unit
+        self.n = 0
+        self.closed = False
+        self.refreshes = 0
+        self.updates: list[int] = []
+        type(self).instances.append(self)
+
+    def update(self, n):
+        self.updates.append(n)
+        self.n += n
+
+    def refresh(self):
+        self.refreshes += 1
+
+    def close(self):
+        self.closed = True
+
+
+def _write_benchmark_config(
+    report_dir: Path,
+    model_params: dict | None = None,
+    endpoint_urls: list[str] | None = None,
+) -> None:
     mp: dict = {"name": _MODEL_NAME}
     if model_params is not None:
         mp.update(model_params)
@@ -30,7 +60,7 @@ def _write_benchmark_config(report_dir: Path, model_params: dict | None = None) 
             {
                 "model_params": mp,
                 "endpoint_config": {
-                    "endpoints": ["http://endpoint-host:30000"],
+                    "endpoints": endpoint_urls or ["http://endpoint-host:30000"],
                     "api_key": "secret-key",
                 },
             }
@@ -111,7 +141,11 @@ class TestSWEBenchScorerPreflight:
             calls.append((url, method, kwargs.get("auth_token")))
             return {
                 "api_version": "v1",
-                "capabilities": ["swebench.run", "artifacts.download"],
+                "capabilities": [
+                    "swebench.run",
+                    "swebench.cancel",
+                    "artifacts.download",
+                ],
             }
 
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
@@ -138,7 +172,11 @@ class TestSWEBenchScorerPreflight:
             classmethod(
                 lambda cls, url, **kwargs: {
                     "api_version": "v1",
-                    "capabilities": ["swebench.run", "artifacts.download"],
+                    "capabilities": [
+                        "swebench.run",
+                        "swebench.cancel",
+                        "artifacts.download",
+                    ],
                 }
             ),
         )
@@ -168,7 +206,11 @@ class TestSWEBenchScorerPreflight:
             classmethod(
                 lambda cls, url, **kwargs: {
                     "api_version": "v2",
-                    "capabilities": ["swebench.run", "artifacts.download"],
+                    "capabilities": [
+                        "swebench.run",
+                        "swebench.cancel",
+                        "artifacts.download",
+                    ],
                 }
             ),
         )
@@ -233,6 +275,176 @@ class TestSWEBenchScorerScore:
 
         assert score == pytest.approx(1 / 3)
         assert calls[-1] == "http://service-host:18080/v1/runs/run-1"
+
+    def test_score_forwards_auth_token_to_service_calls(self, report_dir, monkeypatch):
+        calls: list[tuple[str, str, str | None]] = []
+        downloads: list[tuple[str, str | None]] = []
+        phase = "success"
+
+        def fake_http_json(
+            url, *, method="GET", payload=None, auth_token=None, **kwargs
+        ):
+            calls.append((url, method, auth_token))
+            if phase == "success":
+                if method == "POST":
+                    return {"run_id": "run-1", "status": "running"}
+                return {
+                    "run_id": "run-1",
+                    "status": "succeeded",
+                    "result": {"resolved_instances": 1, "submitted_instances": 3},
+                    "artifacts": [
+                        {
+                            "name": "preds.json",
+                            "url": "/v1/runs/run-1/artifacts/preds.json",
+                        }
+                    ],
+                }
+            if method == "POST" and url.endswith("/cancel"):
+                return {"run_id": "run-2", "status": "cancelled"}
+            if method == "POST":
+                return {"run_id": "run-2", "status": "running"}
+            raise SetupError("poll failed")
+
+        def fake_download(service_url, status, output_dir, auth_token=None):
+            downloads.append((status["run_id"], auth_token))
+
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        monkeypatch.setattr(SWEBenchScorer, "_download_artifacts", fake_download)
+
+        scorer = _make_scorer(report_dir, swebench_service_auth_token="tok")
+        score, _ = scorer.score()
+        assert score == pytest.approx(1 / 3)
+
+        phase = "failure"
+        failed_scorer = _make_scorer(report_dir, swebench_service_auth_token="tok")
+        assert failed_scorer.score() == (None, 1)
+
+        assert all(auth_token == "tok" for _, _, auth_token in calls)
+        assert ("run-1", "tok") in downloads
+        assert (
+            "http://service-host:18080/v1/runs/run-2/cancel",
+            "POST",
+            "tok",
+        ) in calls
+
+    def test_score_rejects_multiple_endpoint_urls(self, report_dir, monkeypatch):
+        _write_benchmark_config(
+            report_dir,
+            endpoint_urls=["http://endpoint-a:30000", "http://endpoint-b:30000"],
+        )
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", MagicMock())
+        scorer = _make_scorer(report_dir)
+
+        with pytest.raises(SetupError, match="exactly one endpoint URL"):
+            scorer.score()
+
+        SWEBenchScorer._http_json.assert_not_called()
+
+    def test_score_renders_agent_and_eval_progress_bars(self, report_dir, monkeypatch):
+        FakeTqdm.instances = []
+        statuses = [
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "phase": "agent",
+                "agent_total": 3,
+                "agent_completed": 1,
+                "eval_total": 0,
+                "eval_completed": 0,
+            },
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "phase": "agent",
+                "agent_total": 3,
+                "agent_completed": 1,
+                "eval_total": 0,
+                "eval_completed": 0,
+            },
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "phase": "eval",
+                "agent_total": 3,
+                "agent_completed": 3,
+                "eval_total": 3,
+                "eval_completed": 2,
+            },
+            {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "phase": "succeeded",
+                "agent_total": 3,
+                "agent_completed": 3,
+                "eval_total": 3,
+                "eval_completed": 3,
+                "result": {"resolved_instances": 2, "submitted_instances": 3},
+                "artifacts": [],
+            },
+        ]
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            return statuses.pop(0)
+
+        monkeypatch.setattr(scoring_mod, "tqdm", FakeTqdm)
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+
+        score, _ = _make_scorer(report_dir).score()
+
+        assert score == pytest.approx(2 / 3)
+        assert [bar.desc for bar in FakeTqdm.instances] == [
+            "SWE-bench agent",
+            "SWE-bench eval",
+        ]
+        assert FakeTqdm.instances[0].n == 3
+        assert FakeTqdm.instances[1].n == 3
+        assert all(bar.closed for bar in FakeTqdm.instances)
+
+    def test_score_without_progress_does_not_open_tqdm(self, report_dir, monkeypatch):
+        statuses = [
+            {"run_id": "run-1", "status": "running"},
+            {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "result": {"resolved_instances": 1, "submitted_instances": 3},
+                "artifacts": [],
+            },
+        ]
+
+        def fake_tqdm(*args, **kwargs):
+            pytest.fail("progress bar should not open without progress fields")
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            return statuses.pop(0)
+
+        monkeypatch.setattr(scoring_mod, "tqdm", fake_tqdm)
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+
+        score, _ = _make_scorer(report_dir).score()
+
+        assert score == pytest.approx(1 / 3)
+
+    def test_interrupt_cancels_service_run(self, report_dir, monkeypatch):
+        calls: list[tuple[str, str]] = []
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            calls.append((url, method))
+            if method == "POST" and url == "http://service-host:18080/v1/runs":
+                return {"run_id": "run-1", "status": "running"}
+            if (
+                method == "POST"
+                and url == "http://service-host:18080/v1/runs/run-1/cancel"
+            ):
+                return {"run_id": "run-1", "status": "cancelled"}
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        scorer = _make_scorer(report_dir)
+
+        with pytest.raises(KeyboardInterrupt):
+            scorer.score()
+
+        assert ("http://service-host:18080/v1/runs/run-1/cancel", "POST") in calls
 
     def test_service_failure_marks_incomplete(self, report_dir, monkeypatch):
         monkeypatch.setattr(

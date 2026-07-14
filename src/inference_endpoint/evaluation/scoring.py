@@ -1793,6 +1793,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     SERVICE_API_VERSION: ClassVar[str] = "v1"
     REQUIRED_SERVICE_CAPABILITIES: ClassVar[set[str]] = {
         "swebench.run",
+        "swebench.cancel",
         "artifacts.download",
     }
     SAFE_ARTIFACT_NAMES: ClassVar[set[str]] = {
@@ -1998,11 +1999,104 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                     service_url, artifact, report_dir, run_id, auth_token
                 )
 
+    @classmethod
+    def _cancel_service_run(
+        cls, service_url: str, run_id: str, auth_token: str | None = None
+    ) -> None:
+        try:
+            cls._http_json(
+                urljoin(service_url, f"v1/runs/{run_id}/cancel"),
+                method="POST",
+                timeout_s=10.0,
+                auth_token=auth_token,
+            )
+        except SetupError:
+            logger.warning("Could not cancel SWE-bench service run %s", run_id)
+
     @staticmethod
     def _write_service_status(report_dir: Path, status: dict[str, Any]) -> None:
         (report_dir / "swe_bench_service_status.json").write_bytes(
             msgspec.json.encode(status)
         )
+
+    @staticmethod
+    def _progress_int(status: dict[str, Any], key: str) -> int | None:
+        value = status.get(key)
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+    @classmethod
+    def _update_progress_bars(
+        cls, status: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        phase = str(status.get("phase") or "")
+        agent_total = cls._progress_int(status, "agent_total")
+        agent_completed = cls._progress_int(status, "agent_completed")
+        eval_total = cls._progress_int(status, "eval_total")
+        eval_completed = cls._progress_int(status, "eval_completed")
+        if (
+            not phase
+            and agent_total is None
+            and agent_completed is None
+            and eval_total is None
+            and eval_completed is None
+        ):
+            return
+
+        agent_bar = state.get("agent_bar")
+        if agent_bar is None and agent_total is not None and agent_total > 0:
+            agent_bar = tqdm(
+                total=agent_total,
+                desc="SWE-bench agent",
+                unit="inst",
+            )
+            state["agent_bar"] = agent_bar
+            state["agent_completed"] = 0
+        if agent_bar is not None:
+            if agent_total is not None and agent_total > (agent_bar.total or 0):
+                agent_bar.total = agent_total
+                agent_bar.refresh()
+            if agent_completed is not None:
+                previous = int(state.get("agent_completed") or 0)
+                current = max(previous, agent_completed)
+                if current > previous:
+                    agent_bar.update(current - previous)
+                    state["agent_completed"] = current
+
+        eval_bar = state.get("eval_bar")
+        should_open_eval = (
+            phase in {"eval", "succeeded"} and eval_total is not None and eval_total > 0
+        )
+        if eval_bar is None and should_open_eval:
+            eval_bar = tqdm(
+                total=eval_total,
+                desc="SWE-bench eval",
+                unit="inst",
+            )
+            state["eval_bar"] = eval_bar
+            state["eval_completed"] = 0
+        if eval_bar is not None:
+            if eval_total is not None and eval_total > (eval_bar.total or 0):
+                eval_bar.total = eval_total
+                eval_bar.refresh()
+            if eval_completed is not None:
+                previous = int(state.get("eval_completed") or 0)
+                current = max(previous, eval_completed)
+                if current > previous:
+                    eval_bar.update(current - previous)
+                    state["eval_completed"] = current
+
+    @staticmethod
+    def _close_progress_bars(state: dict[str, Any]) -> None:
+        for key in ("eval_bar", "agent_bar"):
+            bar = state.get(key)
+            if bar is not None:
+                bar.close()
 
     @classmethod
     def _get_extra_int(
@@ -2244,6 +2338,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         endpoint_config = benchmark_cfg.get("endpoint_config") or {}
         endpoint_urls = endpoint_config.get("endpoints") or []
+        if len(endpoint_urls) != 1:
+            raise SetupError(
+                "SWE-bench service mode supports exactly one endpoint URL; "
+                f"got {len(endpoint_urls)}."
+            )
         payload: dict[str, Any] = {
             "model_name": model_name,
             "endpoint_urls": endpoint_urls,
@@ -2259,6 +2358,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "template": self.swebench_template,
         }
 
+        run_id = ""
+        progress_state: dict[str, Any] = {}
         try:
             submitted = type(self)._http_json(
                 urljoin(self.swebench_service_url, "v1/runs"),
@@ -2270,6 +2371,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             run_id = str(submitted.get("run_id") or "")
             if not run_id:
                 raise SetupError("SWE-bench service did not return run_id")
+            type(self)._update_progress_bars(submitted, progress_state)
 
             import time
 
@@ -2286,10 +2388,27 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                     timeout_s=30.0,
                     auth_token=self.swebench_service_auth_token,
                 )
+                type(self)._update_progress_bars(status, progress_state)
+        except (KeyboardInterrupt, SystemExit):
+            if run_id:
+                type(self)._cancel_service_run(
+                    self.swebench_service_url,
+                    run_id,
+                    self.swebench_service_auth_token,
+                )
+            raise
         except SetupError:
+            if run_id:
+                type(self)._cancel_service_run(
+                    self.swebench_service_url,
+                    run_id,
+                    self.swebench_service_auth_token,
+                )
             logger.error("SWE-bench service run failed", exc_info=True)
             self.complete = False
             return None, 1
+        finally:
+            type(self)._close_progress_bars(progress_state)
 
         type(self)._write_service_status(self.report_dir, status)
         type(self)._download_artifacts(

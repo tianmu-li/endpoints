@@ -18,9 +18,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -35,6 +38,39 @@ from .schemas import RunRequest, TemplateName
 
 class RunnerError(RuntimeError):
     pass
+
+
+class RunCancelled(RunnerError):
+    pass
+
+
+class CancellationToken:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+        with self._lock:
+            process = self._process
+        if process is not None:
+            _terminate_process(process)
+
+    def attach(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._process = process
+            cancelled = self._event.is_set()
+        if cancelled:
+            _terminate_process(process)
+
+    def detach(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            if self._process is process:
+                self._process = None
 
 
 TEMPLATE_FILES: dict[TemplateName, str] = {
@@ -62,6 +98,25 @@ def _exact_instance_filter(instance_ids: list[str]) -> str:
     )
 
 
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+
+
 def _run_subprocess(
     cmd: list[str],
     log_path: Path,
@@ -69,34 +124,54 @@ def _run_subprocess(
     cwd: Path,
     timeout_s: int,
     env: dict[str, str] | None = None,
+    cancel_token: CancellationToken | None = None,
 ) -> None:
+    if cancel_token is not None and cancel_token.is_cancelled():
+        raise RunCancelled(f"subprocess cancelled before start: {cmd}")
+    process: subprocess.Popen[str] | None = None
+    output = ""
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             cmd,
-            check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_s,
             cwd=str(cwd),
             env=env,
+            start_new_session=os.name != "nt",
         )
-    except subprocess.TimeoutExpired as exc:
-        partial = (
-            exc.stdout
-            if isinstance(exc.stdout, str)
-            else (exc.stdout or b"").decode("utf-8", errors="replace")
-        )
-        log_path.write_text(partial)
-        raise RunnerError(f"subprocess timed out after {timeout_s}s: {cmd}") from exc
-    log_path.write_text(completed.stdout or "")
-    if completed.returncode != 0:
-        tail = "\n".join((completed.stdout or "").splitlines()[-50:])
+        if cancel_token is not None:
+            cancel_token.attach(process)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if cancel_token is not None and cancel_token.is_cancelled():
+                _terminate_process(process)
+                output, _ = process.communicate()
+                log_path.write_text(output or "")
+                raise RunCancelled(f"subprocess cancelled: {cmd}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process(process)
+                output, _ = process.communicate()
+                log_path.write_text(output or "")
+                raise RunnerError(f"subprocess timed out after {timeout_s}s: {cmd}")
+            try:
+                output, _ = process.communicate(timeout=min(0.5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if process is not None and cancel_token is not None:
+            cancel_token.detach(process)
+
+    log_path.write_text(output or "")
+    if process.returncode != 0:
+        tail = "\n".join((output or "").splitlines()[-50:])
         raise RunnerError(
-            f"subprocess exited with code {completed.returncode}: {cmd}\n{tail}"
+            f"subprocess exited with code {process.returncode}: {cmd}\n{tail}"
         )
 
 
@@ -110,7 +185,12 @@ class SwebenchRunner:
         self.project_root = project_root.resolve()
         self.subprocess_timeout_s = subprocess_timeout_s
 
-    def run(self, request: RunRequest, run_dir: Path) -> dict[str, Any]:
+    def run(
+        self,
+        request: RunRequest,
+        run_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> dict[str, Any]:
         run_dir.mkdir(parents=True, exist_ok=True)
         secret_values = (
             {request.endpoint_api_key} if request.endpoint_api_key else set()
@@ -131,7 +211,7 @@ class SwebenchRunner:
                 Path(config_tmp),
                 request,
             )
-            self._run_agent(request, patched_config, output_dir, run_dir)
+            self._run_agent(request, patched_config, output_dir, run_dir, cancel_token)
 
         preds_path = output_dir / "preds.json"
         if not preds_path.exists():
@@ -139,7 +219,9 @@ class SwebenchRunner:
         self._validate_prediction_ids(request, preds_path)
         shutil.copy2(preds_path, run_dir / "preds.json")
 
-        result_path = self._run_eval(request, preds_path, output_dir, run_dir)
+        result_path = self._run_eval(
+            request, preds_path, output_dir, run_dir, cancel_token
+        )
         shutil.copy2(result_path, run_dir / "swe_bench_results.json")
         return msgspec.json.decode(result_path.read_bytes(), type=dict)
 
@@ -220,6 +302,7 @@ class SwebenchRunner:
         patched_config: Path,
         output_dir: Path,
         run_dir: Path,
+        cancel_token: CancellationToken | None = None,
     ) -> None:
         instance_filter = _exact_instance_filter(request.evaluated_instance_ids)
         cmd = [
@@ -249,6 +332,7 @@ class SwebenchRunner:
                     cwd=output_dir,
                     timeout_s=self.subprocess_timeout_s,
                     env=env,
+                    cancel_token=cancel_token,
                 )
                 return
         _run_subprocess(
@@ -257,6 +341,7 @@ class SwebenchRunner:
             cwd=output_dir,
             timeout_s=self.subprocess_timeout_s,
             env=self._base_env(request),
+            cancel_token=cancel_token,
         )
 
     def _base_env(self, request: RunRequest) -> dict[str, str]:
@@ -361,8 +446,10 @@ class SwebenchRunner:
         preds_path: Path,
         output_dir: Path,
         run_dir: Path,
+        cancel_token: CancellationToken | None = None,
     ) -> Path:
         run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
+        (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
         dataset_name = {
             "verified": "princeton-nlp/SWE-bench_Verified",
             "lite": "princeton-nlp/SWE-bench_Lite",
@@ -370,7 +457,7 @@ class SwebenchRunner:
         if dataset_name is None:
             raise RunnerError(f"unknown SWE-bench subset: {request.subset}")
         cmd = [
-            "python",
+            sys.executable,
             "-m",
             "swebench.harness.run_evaluation",
             "--dataset_name",
@@ -391,6 +478,7 @@ class SwebenchRunner:
             run_dir / "swe_bench_eval.log",
             cwd=output_dir,
             timeout_s=self.subprocess_timeout_s,
+            cancel_token=cancel_token,
         )
         safe_model = request.model_name.replace("/", "__")
         result_path = output_dir / f"{safe_model}.{run_id}.json"
