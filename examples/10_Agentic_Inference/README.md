@@ -199,25 +199,29 @@ uv run inference-endpoint benchmark from-config \
 
 `swe_bench_accuracy.yaml` runs the SWE-bench accuracy evaluation alongside a
 minimal performance dataset. The benchmark framework skips its built-in
-accuracy phase for this dataset; instead, `SWEBenchScorer` shells out to
-`mini-swe-agent` and the `swebench` evaluation harness, and that external flow
-drives requests to the configured endpoint.
+accuracy phase for this dataset; instead, `SWEBenchScorer` submits the run to a
+native SWE-bench service. The service host owns Docker, `mini-swe-agent`, and
+the `swebench` evaluation harness, and it drives requests to the configured
+endpoint.
 
 Keep `accuracy_config.num_repeats: 1`: the scorer performs one external
 evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
 `split` are used consistently for dataset loading, preflight, and scoring.
+
+`accuracy_config.extras.swebench_service_url` points the benchmark client to
+the service. Endpoint URLs in `endpoint_config.endpoints` must be reachable from
+the service host.
 
 `accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`).
 If unset, it defaults to the load pattern's `target_concurrency` (for
 `concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers`
 (default 10, `--max_workers`) sets the eval harness's parallelism.
 
-The isolated `uv` environment for those tools lives in `accuracy/`. Sync it
-once before running:
+Start the service on the host that has Docker:
 
 ```bash
-cd examples/10_Agentic_Inference/accuracy
-uv sync
+uv run --project src/inference_endpoint/evaluation/swebench_service \
+  python -m swebench_service --host 0.0.0.0 --port 18080
 ```
 
 Then run the benchmark from the repo root:

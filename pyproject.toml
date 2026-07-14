@@ -28,6 +28,8 @@ source-exclude = [
     # numpy<2 / prm800k that conflict with the parent env). Invoked only via
     # `uv run --project`, never imported - keep it out of the parent wheel.
     "inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/**",
+    # Isolated native uv service that owns SWE-bench Docker execution.
+    "inference_endpoint/evaluation/swebench_service/**",
 ]
 
 [project]

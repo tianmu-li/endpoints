@@ -6,32 +6,26 @@ HuggingFace access, or mini-swe-agent wiring issues.
 
 ## 0. Preconditions
 
-- Docker daemon running (swebench harness spawns one container per instance).
-- Docker Hub auth or a pre-seeded image cache for uncached SWE-bench images.
-- Network egress to PyPI and HuggingFace Hub.
+- Docker daemon running on the SWE-bench service host.
+- Docker Hub auth or a pre-seeded image cache on the service host.
+- Network egress to PyPI and HuggingFace Hub from the service host.
+- Endpoint URLs reachable from the service host.
 - `uv` binary on PATH (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 - Parent endpoints env already synced (`uv sync --extra dev` from repo root).
 
-## 1. Sync the accuracy subproject
+## 1. Start the SWE-bench service
 
 From the repo root:
 
 ```bash
-cd examples/10_Agentic_Inference/accuracy
-uv sync
+uv run --project src/inference_endpoint/evaluation/swebench_service \
+  python -m swebench_service --host 0.0.0.0 --port 18080
 ```
 
 Sanity check:
 
 ```bash
-uv run mini-extra --help
-uv run python -m swebench.harness.run_evaluation --help
-```
-
-Override the default subproject path via env var if needed:
-
-```bash
-export SWE_BENCH_PROJECT_PATH="$(pwd)/examples/10_Agentic_Inference/accuracy"
+curl http://localhost:18080/health
 ```
 
 ## 2. End-to-end test (requires live endpoint)
@@ -45,10 +39,8 @@ uv run inference-endpoint benchmark from-config \
 `--mode both` is required: `type: online` configs default to `TestMode.PERF`,
 which skips accuracy datasets.
 
-Scorer preflight resolves the requested SWE-bench instances and pre-pulls the
-required Docker images before `mini-extra swebench` starts, using the configured
-SWE-bench `workers` count and a compact full-count progress bar. Cached images
-still complete immediately in that bar.
+Scorer preflight calls the service `/health` endpoint. It does not check Docker
+or pre-pull images on the benchmark client.
 
 Qwen SWE-bench configs may opt into `enable_swebench_toolcall_patch: true` and
 the `swebench_qwen_tools_template.yaml` template. That path builds a temporary
@@ -59,8 +51,8 @@ runs.
 
 ## Common failure modes
 
-| Symptom                                              | Likely cause                          | Fix                                                       |
-| ---------------------------------------------------- | ------------------------------------- | --------------------------------------------------------- |
-| `FileNotFoundError: SWE-bench subproject not found`  | subproject not synced                 | Run `uv sync` in `examples/10_Agentic_Inference/accuracy` |
-| Docker error during `run_evaluation`                 | Docker daemon not running             | Start Docker and retry                                    |
-| `Failed to pre-pull required SWE-bench Docker image` | Docker Hub rate limit or missing auth | Run `docker login` or use a local image cache/mirror      |
+| Symptom                              | Likely cause                              | Fix                                                |
+| ------------------------------------ | ----------------------------------------- | -------------------------------------------------- |
+| `swebench_service_url is required`   | Client config missing service URL         | Set `accuracy_config.extras.swebench_service_url`  |
+| Service health check fails           | Service not running or unreachable        | Start the service or fix client-to-service routing |
+| Docker error during `run_evaluation` | Docker daemon not running on service host | Start Docker on the service host and retry         |
