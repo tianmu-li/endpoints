@@ -9,7 +9,7 @@ module-root = "."
 name = "swebench-service"
 version = "0.1.0"
 description = "Native SWE-bench service for MLPerf endpoint accuracy runs."
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiohttp==3.14.1",
     "mini-swe-agent==2.3.0",
