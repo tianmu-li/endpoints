@@ -20,6 +20,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 RunState = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+RunProgressPhase = Literal[
+    "queued",
+    "agent",
+    "eval",
+    "succeeded",
+    "failed",
+    "cancelled",
+]
 TemplateName = Literal["default", "qwen_tools"]
 
 
@@ -50,6 +58,12 @@ class RunStatus(BaseModel):
     status: RunState
     created_at: float
     updated_at: float
+    phase: RunProgressPhase | None = None
+    agent_total: int | None = None
+    agent_completed: int | None = None
+    eval_total: int | None = None
+    eval_completed: int | None = None
+    message: str | None = None
     error: str | None = None
     result: dict[str, Any] | None = None
     artifacts: list[ArtifactInfo] = Field(default_factory=list)

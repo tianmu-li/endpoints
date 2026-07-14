@@ -107,3 +107,28 @@ def test_validate_prediction_ids_rejects_unexpected_instances(tmp_path):
 
     with pytest.raises(RunnerError, match="unexpected SWE-bench"):
         runner._validate_prediction_ids(request, preds)
+
+
+def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    request = _request(["http://endpoint:30000"])
+    output_dir = tmp_path / "output"
+    run_dir = tmp_path / "run"
+    output_dir.mkdir()
+    run_dir.mkdir()
+    preds_path = output_dir / "preds.json"
+    preds_path.write_text('{"repo__repo-1":"patch"}')
+
+    def fake_run_subprocess(cmd, log_path, *, cwd, **kwargs):
+        run_id = cmd[cmd.index("--run_id") + 1]
+        assert (run_dir / "swe_bench_eval_run_id.txt").read_text() == run_id
+        (cwd / f"test-model.{run_id}.json").write_text(
+            '{"resolved_instances":1,"submitted_instances":1}'
+        )
+
+    monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run_subprocess)
+
+    result_path = runner._run_eval(request, preds_path, output_dir, run_dir)
+
+    assert result_path.exists()
+    assert (run_dir / "swe_bench_eval_run_id.txt").read_text().startswith("endpoints_")

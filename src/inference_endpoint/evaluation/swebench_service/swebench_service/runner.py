@@ -449,6 +449,7 @@ class SwebenchRunner:
         cancel_token: CancellationToken | None = None,
     ) -> Path:
         run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
+        (run_dir / "swe_bench_eval_run_id.txt").write_text(run_id)
         dataset_name = {
             "verified": "princeton-nlp/SWE-bench_Verified",
             "lite": "princeton-nlp/SWE-bench_Lite",

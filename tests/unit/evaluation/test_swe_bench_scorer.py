@@ -21,6 +21,30 @@ _DATASET_NAME = "swe_bench"
 _MODEL_NAME = "TestOrg/test-model-7b"
 
 
+class FakeTqdm:
+    instances: list["FakeTqdm"] = []
+
+    def __init__(self, *, total, desc, unit):
+        self.total = total
+        self.desc = desc
+        self.unit = unit
+        self.n = 0
+        self.closed = False
+        self.refreshes = 0
+        self.updates: list[int] = []
+        type(self).instances.append(self)
+
+    def update(self, n):
+        self.updates.append(n)
+        self.n += n
+
+    def refresh(self):
+        self.refreshes += 1
+
+    def close(self):
+        self.closed = True
+
+
 def _write_benchmark_config(report_dir: Path, model_params: dict | None = None) -> None:
     mp: dict = {"name": _MODEL_NAME}
     if model_params is not None:
@@ -245,6 +269,90 @@ class TestSWEBenchScorerScore:
 
         assert score == pytest.approx(1 / 3)
         assert calls[-1] == "http://service-host:18080/v1/runs/run-1"
+
+    def test_score_renders_agent_and_eval_progress_bars(self, report_dir, monkeypatch):
+        FakeTqdm.instances = []
+        statuses = [
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "phase": "agent",
+                "agent_total": 3,
+                "agent_completed": 1,
+                "eval_total": 0,
+                "eval_completed": 0,
+            },
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "phase": "agent",
+                "agent_total": 3,
+                "agent_completed": 1,
+                "eval_total": 0,
+                "eval_completed": 0,
+            },
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "phase": "eval",
+                "agent_total": 3,
+                "agent_completed": 3,
+                "eval_total": 3,
+                "eval_completed": 2,
+            },
+            {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "phase": "succeeded",
+                "agent_total": 3,
+                "agent_completed": 3,
+                "eval_total": 3,
+                "eval_completed": 3,
+                "result": {"resolved_instances": 2, "submitted_instances": 3},
+                "artifacts": [],
+            },
+        ]
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            return statuses.pop(0)
+
+        monkeypatch.setattr(scoring_mod, "tqdm", FakeTqdm)
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+
+        score, _ = _make_scorer(report_dir).score()
+
+        assert score == pytest.approx(2 / 3)
+        assert [bar.desc for bar in FakeTqdm.instances] == [
+            "SWE-bench agent",
+            "SWE-bench eval",
+        ]
+        assert FakeTqdm.instances[0].n == 3
+        assert FakeTqdm.instances[1].n == 3
+        assert all(bar.closed for bar in FakeTqdm.instances)
+
+    def test_score_without_progress_does_not_open_tqdm(self, report_dir, monkeypatch):
+        statuses = [
+            {"run_id": "run-1", "status": "running"},
+            {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "result": {"resolved_instances": 1, "submitted_instances": 3},
+                "artifacts": [],
+            },
+        ]
+
+        def fake_tqdm(*args, **kwargs):
+            pytest.fail("progress bar should not open without progress fields")
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            return statuses.pop(0)
+
+        monkeypatch.setattr(scoring_mod, "tqdm", fake_tqdm)
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+
+        score, _ = _make_scorer(report_dir).score()
+
+        assert score == pytest.approx(1 / 3)
 
     def test_interrupt_cancels_service_run(self, report_dir, monkeypatch):
         calls: list[tuple[str, str]] = []
