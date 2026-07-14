@@ -1739,6 +1739,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     SERVICE_API_VERSION: ClassVar[str] = "v1"
     REQUIRED_SERVICE_CAPABILITIES: ClassVar[set[str]] = {
         "swebench.run",
+        "swebench.cancel",
         "artifacts.download",
     }
     SAFE_ARTIFACT_NAMES: ClassVar[set[str]] = {
@@ -1943,6 +1944,20 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 cls._download_artifact(
                     service_url, artifact, report_dir, run_id, auth_token
                 )
+
+    @classmethod
+    def _cancel_service_run(
+        cls, service_url: str, run_id: str, auth_token: str | None = None
+    ) -> None:
+        try:
+            cls._http_json(
+                urljoin(service_url, f"v1/runs/{run_id}/cancel"),
+                method="POST",
+                timeout_s=10.0,
+                auth_token=auth_token,
+            )
+        except SetupError:
+            logger.warning("Could not cancel SWE-bench service run %s", run_id)
 
     @staticmethod
     def _write_service_status(report_dir: Path, status: dict[str, Any]) -> None:
@@ -2205,6 +2220,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "template": self.swebench_template,
         }
 
+        run_id = ""
         try:
             submitted = type(self)._http_json(
                 urljoin(self.swebench_service_url, "v1/runs"),
@@ -2232,7 +2248,21 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                     timeout_s=30.0,
                     auth_token=self.swebench_service_auth_token,
                 )
+        except (KeyboardInterrupt, SystemExit):
+            if run_id:
+                type(self)._cancel_service_run(
+                    self.swebench_service_url,
+                    run_id,
+                    self.swebench_service_auth_token,
+                )
+            raise
         except SetupError:
+            if run_id:
+                type(self)._cancel_service_run(
+                    self.swebench_service_url,
+                    run_id,
+                    self.swebench_service_auth_token,
+                )
             logger.error("SWE-bench service run failed", exc_info=True)
             self.complete = False
             return None, 1

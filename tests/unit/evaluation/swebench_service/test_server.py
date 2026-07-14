@@ -3,6 +3,8 @@
 
 import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,25 @@ class FakeRunner:
             '{"resolved_instances":1,"submitted_instances":1}'
         )
         return {"resolved_instances": 1, "submitted_instances": 1}
+
+
+class CancellationAwareRunner:
+    def __init__(self):
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+
+    def run(self, request, run_dir: Path, cancel_token=None):
+        self.started.set()
+        deadline = time.monotonic() + 5
+        while (
+            cancel_token is not None
+            and not cancel_token.is_cancelled()
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        if cancel_token is not None and cancel_token.is_cancelled():
+            self.cancelled.set()
+        return {"resolved_instances": 0, "submitted_instances": 0}
 
 
 def _payload() -> dict:
@@ -91,6 +112,7 @@ async def test_health_response_schema(tmp_path):
     assert resp.status == 200
     assert body["api_version"] == "v1"
     assert "swebench.run" in body["capabilities"]
+    assert "swebench.cancel" in body["capabilities"]
     assert "artifacts.download" in body["capabilities"]
 
 
@@ -159,6 +181,38 @@ async def test_runner_transitions_to_failed(tmp_path):
 
     assert status["status"] == "failed"
     assert "runner failed" in status["error"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_marks_cancelled_and_signals_runner(tmp_path):
+    runner = CancellationAwareRunner()
+    client = await _client(tmp_path, runner)
+    try:
+        submit = await client.post("/v1/runs", json=_payload())
+        submitted = await submit.json()
+        assert await asyncio.to_thread(runner.started.wait, 2)
+
+        cancel_resp = await client.post(f"/v1/runs/{submitted['run_id']}/cancel")
+        cancelled = await cancel_resp.json()
+
+        assert await asyncio.to_thread(runner.cancelled.wait, 2)
+    finally:
+        await client.close()
+
+    assert cancel_resp.status == 200
+    assert cancelled["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_active_runs(tmp_path):
+    runner = CancellationAwareRunner()
+    client = await _client(tmp_path, runner)
+    await client.post("/v1/runs", json=_payload())
+    assert await asyncio.to_thread(runner.started.wait, 2)
+
+    await client.close()
+
+    assert await asyncio.to_thread(runner.cancelled.wait, 2)
 
 
 @pytest.mark.asyncio

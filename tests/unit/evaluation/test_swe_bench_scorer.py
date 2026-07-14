@@ -111,7 +111,11 @@ class TestSWEBenchScorerPreflight:
             calls.append((url, method, kwargs.get("auth_token")))
             return {
                 "api_version": "v1",
-                "capabilities": ["swebench.run", "artifacts.download"],
+                "capabilities": [
+                    "swebench.run",
+                    "swebench.cancel",
+                    "artifacts.download",
+                ],
             }
 
         monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
@@ -138,7 +142,11 @@ class TestSWEBenchScorerPreflight:
             classmethod(
                 lambda cls, url, **kwargs: {
                     "api_version": "v1",
-                    "capabilities": ["swebench.run", "artifacts.download"],
+                    "capabilities": [
+                        "swebench.run",
+                        "swebench.cancel",
+                        "artifacts.download",
+                    ],
                 }
             ),
         )
@@ -168,7 +176,11 @@ class TestSWEBenchScorerPreflight:
             classmethod(
                 lambda cls, url, **kwargs: {
                     "api_version": "v2",
-                    "capabilities": ["swebench.run", "artifacts.download"],
+                    "capabilities": [
+                        "swebench.run",
+                        "swebench.cancel",
+                        "artifacts.download",
+                    ],
                 }
             ),
         )
@@ -233,6 +245,28 @@ class TestSWEBenchScorerScore:
 
         assert score == pytest.approx(1 / 3)
         assert calls[-1] == "http://service-host:18080/v1/runs/run-1"
+
+    def test_interrupt_cancels_service_run(self, report_dir, monkeypatch):
+        calls: list[tuple[str, str]] = []
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            calls.append((url, method))
+            if method == "POST" and url == "http://service-host:18080/v1/runs":
+                return {"run_id": "run-1", "status": "running"}
+            if (
+                method == "POST"
+                and url == "http://service-host:18080/v1/runs/run-1/cancel"
+            ):
+                return {"run_id": "run-1", "status": "cancelled"}
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        scorer = _make_scorer(report_dir)
+
+        with pytest.raises(KeyboardInterrupt):
+            scorer.score()
+
+        assert ("http://service-host:18080/v1/runs/run-1/cancel", "POST") in calls
 
     def test_service_failure_marks_incomplete(self, report_dir, monkeypatch):
         monkeypatch.setattr(

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import shutil
 import time
 import uuid
@@ -29,7 +30,7 @@ from pydantic import ValidationError
 from . import API_VERSION, CAPABILITIES
 from .artifacts import redact_secrets, redact_text, resolve_artifact
 from .config import ServiceConfig
-from .runner import SwebenchRunner
+from .runner import CancellationToken, RunCancelled, SwebenchRunner
 from .schemas import ArtifactInfo, RunRequest, RunStatus
 
 
@@ -39,6 +40,7 @@ class RunManager:
         self.runner = runner
         self.runs: dict[str, RunStatus] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._cancel_tokens: dict[str, CancellationToken] = {}
         self._secret_values: dict[str, set[str]] = {}
         self._semaphore = asyncio.Semaphore(config.max_concurrent_runs)
 
@@ -56,6 +58,7 @@ class RunManager:
             run_id=run_id, status="queued", created_at=now, updated_at=now
         )
         self.runs[run_id] = status
+        self._cancel_tokens[run_id] = CancellationToken()
         self._secret_values[run_id] = self._secrets_for_request(request)
         run_dir = self.run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -74,33 +77,85 @@ class RunManager:
         return status
 
     async def _execute(self, run_id: str, request: RunRequest, run_dir: Path) -> None:
-        async with self._semaphore:
-            self._update(run_id, status="running")
-            try:
-                result = await asyncio.to_thread(self.runner.run, request, run_dir)
-            except Exception as exc:
+        token = self._cancel_tokens[run_id]
+        try:
+            async with self._semaphore:
+                if token.is_cancelled():
+                    self._update(run_id, status="cancelled")
+                    return
+                self._update(run_id, status="running")
+                try:
+                    result = await asyncio.to_thread(
+                        self._run_runner, request, run_dir, token
+                    )
+                except RunCancelled:
+                    self._update(run_id, status="cancelled")
+                    return
+                except Exception as exc:
+                    if token.is_cancelled():
+                        self._update(run_id, status="cancelled")
+                        return
+                    self._update(
+                        run_id,
+                        status="failed",
+                        error=redact_text(
+                            str(exc), self._secret_values.get(run_id, set())
+                        ),
+                    )
+                    return
+                if token.is_cancelled():
+                    self._update(run_id, status="cancelled")
+                    return
+                artifacts = [
+                    ArtifactInfo(name=name, url=f"/v1/runs/{run_id}/artifacts/{name}")
+                    for name in (
+                        "preds.json",
+                        "swe_bench_agent.log",
+                        "swe_bench_eval.log",
+                        "swe_bench_results.json",
+                        "status.json",
+                    )
+                    if (run_dir / name).exists()
+                ]
                 self._update(
-                    run_id,
-                    status="failed",
-                    error=redact_text(str(exc), self._secret_values.get(run_id, set())),
+                    run_id, status="succeeded", result=result, artifacts=artifacts
                 )
-                self._tasks.pop(run_id, None)
-                self._prune_completed_runs()
-                return
-            artifacts = [
-                ArtifactInfo(name=name, url=f"/v1/runs/{run_id}/artifacts/{name}")
-                for name in (
-                    "preds.json",
-                    "swe_bench_agent.log",
-                    "swe_bench_eval.log",
-                    "swe_bench_results.json",
-                    "status.json",
-                )
-                if (run_dir / name).exists()
-            ]
-            self._update(run_id, status="succeeded", result=result, artifacts=artifacts)
+        finally:
             self._tasks.pop(run_id, None)
             self._prune_completed_runs()
+
+    def _run_runner(
+        self, request: RunRequest, run_dir: Path, token: CancellationToken
+    ) -> dict[str, Any]:
+        try:
+            signature = inspect.signature(self.runner.run)
+        except (TypeError, ValueError):
+            return self.runner.run(request, run_dir)
+        if "cancel_token" not in signature.parameters:
+            return self.runner.run(request, run_dir)
+        return self.runner.run(request, run_dir, cancel_token=token)
+
+    def cancel(self, run_id: str) -> RunStatus:
+        status = self.get(run_id)
+        if status.status not in {"queued", "running"}:
+            return status
+        token = self._cancel_tokens.get(run_id)
+        if token is not None:
+            token.cancel()
+        self._update(run_id, status="cancelled")
+        return self.runs[run_id]
+
+    async def cancel_all_active(self) -> None:
+        active = [
+            run.run_id
+            for run in self.runs.values()
+            if run.status in {"queued", "running"}
+        ]
+        for run_id in active:
+            self.cancel(run_id)
+        tasks = [self._tasks[run_id] for run_id in active if run_id in self._tasks]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _secrets_for_request(self, request: RunRequest) -> set[str]:
         secrets: set[str] = set()
@@ -152,6 +207,7 @@ class RunManager:
             return
         for run in sorted(completed, key=lambda item: item.updated_at)[:overflow]:
             self.runs.pop(run.run_id, None)
+            self._cancel_tokens.pop(run.run_id, None)
             self._secret_values.pop(run.run_id, None)
             shutil.rmtree(self.run_dir(run.run_id), ignore_errors=True)
 
@@ -187,6 +243,11 @@ def create_app(config: ServiceConfig, runner: Any | None = None) -> web.Applicat
     app = web.Application(middlewares=[auth_middleware])
     app[MANAGER_KEY] = manager
 
+    async def shutdown_active_runs(app: web.Application) -> None:
+        await app[MANAGER_KEY].cancel_all_active()
+
+    app.on_shutdown.append(shutdown_active_runs)
+
     async def health(request: web.Request) -> web.Response:
         return web.json_response(
             {"api_version": API_VERSION, "capabilities": CAPABILITIES, "status": "ok"}
@@ -216,6 +277,15 @@ def create_app(config: ServiceConfig, runner: Any | None = None) -> web.Applicat
             )
         )
 
+    async def cancel_run(request: web.Request) -> web.Response:
+        status = manager.cancel(request.match_info["run_id"])
+        return web.json_response(
+            redact_secrets(
+                status.model_dump(mode="json"),
+                secret_values=manager._secret_values.get(status.run_id, set()),
+            )
+        )
+
     async def get_artifact(request: web.Request) -> web.FileResponse:
         run_id = request.match_info["run_id"]
         name = request.match_info["name"]
@@ -229,5 +299,6 @@ def create_app(config: ServiceConfig, runner: Any | None = None) -> web.Applicat
     app.router.add_get("/health", health)
     app.router.add_post("/v1/runs", post_run)
     app.router.add_get("/v1/runs/{run_id}", get_run)
+    app.router.add_post("/v1/runs/{run_id}/cancel", cancel_run)
     app.router.add_get("/v1/runs/{run_id}/artifacts/{name}", get_artifact)
     return app

@@ -16,4 +16,4 @@
 """Native SWE-bench service."""
 
 API_VERSION = "v1"
-CAPABILITIES = ["swebench.run", "artifacts.download"]
+CAPABILITIES = ["swebench.run", "swebench.cancel", "artifacts.download"]
