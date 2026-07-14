@@ -92,6 +92,16 @@ class TestSWEBenchScorerRegistration:
         assert SWEBenchScorer.external_sample_count({"num_instances": "bad"}) is None
         assert SWEBenchScorer.external_sample_count({"num_instances": 0}) is None
 
+    def test_poll_interval_defaults_when_constructor_passes_none(self):
+        options = SWEBenchScorer._resolve_options(
+            {
+                "swebench_service_url": "http://service-host:18080",
+                "poll_interval_s": None,
+            }
+        )
+
+        assert options["poll_interval_s"] == SWEBenchScorer.DEFAULT_POLL_INTERVAL_S
+
 
 class TestSWEBenchScorerPreflight:
     def test_preflight_calls_health(self, monkeypatch):

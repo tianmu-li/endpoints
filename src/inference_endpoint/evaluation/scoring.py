@@ -2003,6 +2003,25 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         )
 
     @classmethod
+    def _get_extra_float(
+        cls, extras: dict[str, Any], key: str, *, default: float, min_value: float = 0
+    ) -> float:
+        value = extras.get(key)
+        if value is None:
+            value = default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise SetupError(
+                f"accuracy_config.extras.{key} must be numeric; got {value!r}"
+            ) from exc
+        if parsed <= min_value:
+            raise SetupError(
+                f"accuracy_config.extras.{key} must be > {min_value:g}; got {parsed}"
+            )
+        return parsed
+
+    @classmethod
     def _resolve_dataset_options(cls, extras: dict[str, Any]) -> dict[str, str]:
         subset = str(extras.get("subset", cls.DEFAULT_SUBSET))
         SWEBench.hf_dataset_name(subset)
@@ -2067,17 +2086,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             default=cls.DEFAULT_SERVICE_TIMEOUT_S,
             min_value=1,
         )
-        poll_interval = extras.get("poll_interval_s", cls.DEFAULT_POLL_INTERVAL_S)
-        try:
-            poll_interval = float(poll_interval)
-        except (TypeError, ValueError) as exc:
-            raise SetupError(
-                "accuracy_config.extras.poll_interval_s must be numeric; "
-                f"got {poll_interval!r}"
-            ) from exc
-        if poll_interval <= 0:
-            raise SetupError("accuracy_config.extras.poll_interval_s must be > 0")
-        options["poll_interval_s"] = poll_interval
+        options["poll_interval_s"] = cls._get_extra_float(
+            extras,
+            "poll_interval_s",
+            default=cls.DEFAULT_POLL_INTERVAL_S,
+            min_value=0,
+        )
         return options
 
     @staticmethod
