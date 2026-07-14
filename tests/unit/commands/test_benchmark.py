@@ -1848,9 +1848,7 @@ class TestFinalizeBenchmark:
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
 
-        results = json.loads((tmp_path / "results.json").read_text())
-        assert results["results"]["total"] == 3
-        assert "accuracy_scores" not in results
+        assert not (tmp_path / "accuracy" / "accuracy_results.json").exists()
 
     @pytest.mark.unit
     def test_skip_endpoint_phase_scorer_gets_empty_sample_idx_map(self, tmp_path):
@@ -1871,8 +1869,11 @@ class TestFinalizeBenchmark:
         idx_map = json.loads((tmp_path / "sample_idx_map.json").read_text())
         assert idx_map["performance"] == {"uuid-0": 0, "uuid-1": 1, "uuid-2": 2}
         assert idx_map["external_accuracy"] == {}
-        results = json.loads((tmp_path / "results.json").read_text())
-        assert results["accuracy_scores"]["external_accuracy"]["score"] == 1.0
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert results["accuracy_scores"][0]["dataset_name"] == "external_accuracy"
+        assert results["accuracy_scores"][0]["score"] == 1.0
 
     @pytest.mark.unit
     def test_skip_endpoint_phase_scorer_reports_external_sample_count(self, tmp_path):
@@ -1891,8 +1892,12 @@ class TestFinalizeBenchmark:
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
 
-        results = json.loads((tmp_path / "results.json").read_text())
-        assert results["accuracy_scores"]["external_accuracy"]["num_samples"] == 2
+        results = json.loads(
+            (tmp_path / "accuracy" / "accuracy_results.json").read_text()
+        )
+        assert results["accuracy_scores"][0]["dataset_name"] == "external_accuracy"
+        assert results["accuracy_scores"][0]["unit_samples"] == 2
+        assert results["accuracy_scores"][0]["total_samples"] == 2
 
 
 class TestScorerMethodSync:

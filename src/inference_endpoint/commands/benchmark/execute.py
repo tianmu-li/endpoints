@@ -1429,6 +1429,8 @@ def _score_accuracy(
     issued counts instead of unit × repeats (repeats is forced to 1 there).
     """
     accuracy_scores: list[dict[str, Any]] = []
+    if ctx.test_mode not in (TestMode.ACC, TestMode.BOTH):
+        return accuracy_scores
 
     # Per-phase wall-clock (seconds) keyed by phase name. The accuracy phase name
     # is the dataset_name; the inline-scored perf entry keys on "performance".

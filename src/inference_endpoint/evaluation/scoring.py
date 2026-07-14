@@ -58,9 +58,9 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
-from .accuracy_results import build_breakdown
 from ..dataset_manager.predefined.swe_bench import SWEBench
 from ..exceptions import SetupError
+from .accuracy_results import build_breakdown
 from .extractor import (
     Extractor,
     PythonCodeExtractor,
