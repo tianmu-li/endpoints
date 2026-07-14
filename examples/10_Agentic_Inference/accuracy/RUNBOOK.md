@@ -9,7 +9,7 @@ HuggingFace access, or mini-swe-agent wiring issues.
 - Docker daemon running on the SWE-bench service host.
 - Docker Hub auth or a pre-seeded image cache on the service host.
 - Network egress to PyPI and HuggingFace Hub from the service host.
-- Endpoint URLs reachable from the service host.
+- Endpoint URL reachable from the service host.
 - `uv` binary on PATH (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 - Parent endpoints env already synced (`uv sync --extra dev` from repo root).
 
@@ -42,7 +42,7 @@ which skips accuracy datasets.
 Scorer preflight calls the service `/health` endpoint. It does not check Docker
 or pre-pull images on the benchmark client.
 
-The service is trusted infrastructure. It receives endpoint URLs and optional
+The service is trusted infrastructure. It receives one endpoint URL and optional
 endpoint credentials, runs Docker-backed evaluations, and serves artifacts. For
 non-loopback deployments, bind it on a private network or start it with
 `--auth-token TOKEN` and set

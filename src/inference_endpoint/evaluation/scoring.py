@@ -1721,63 +1721,6 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         return mean_score, n_repeats
 
 
-def _resolve_subproject_path(
-    explicit: str | os.PathLike | None,
-    env_var: str,
-    default: Path,
-) -> Path:
-    if explicit is not None:
-        return Path(explicit).expanduser().resolve()
-    from_env = os.environ.get(env_var)
-    if from_env:
-        return Path(from_env).expanduser().resolve()
-    return default.expanduser().resolve()
-
-
-def _run_subprocess_with_log(
-    cmd: list[str],
-    log_path: Path,
-    *,
-    timeout_s: int | None,
-    label: str,
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
-) -> None:
-    """Run *cmd*, capture stdout+stderr to *log_path*, raise on timeout or non-zero exit."""
-    try:
-        completed = subprocess.run(
-            cmd,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_s,
-            cwd=str(cwd) if cwd is not None else None,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as e:
-        partial = (
-            e.stdout
-            if isinstance(e.stdout, str)
-            else (e.stdout or b"").decode("utf-8", errors="replace")
-        )
-        log_path.write_text(partial)
-        raise RuntimeError(
-            f"{label} subprocess timed out after {timeout_s}s; "
-            f"see {log_path} for partial output."
-        ) from e
-    log_path.write_text(completed.stdout or "")
-    if completed.returncode != 0:
-        tail = "\n".join((completed.stdout or "").splitlines()[-50:])
-        raise RuntimeError(
-            f"{label} subprocess exited with code {completed.returncode}; "
-            f"full log at {log_path}. Last 50 lines:\n{tail}"
-        )
-
-
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     """SWE-bench accuracy scorer backed by a remote SWE-bench service."""
 

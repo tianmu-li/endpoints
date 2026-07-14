@@ -16,9 +16,12 @@ pytestmark = pytest.mark.unit
 
 _ACTIONS_TOOLCALL = (
     Path(__file__).resolve().parents[3]
-    / "examples"
-    / "10_Agentic_Inference"
-    / "accuracy"
+    / "src"
+    / "inference_endpoint"
+    / "evaluation"
+    / "swebench_service"
+    / "swebench_service"
+    / "templates"
     / "actions_toolcall.py"
 )
 

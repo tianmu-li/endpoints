@@ -2,7 +2,7 @@
 
 Runs mini-swe-agent and the SWE-bench harness on a host with Docker. The
 benchmark client only needs this service URL, but the service is trusted
-infrastructure: it receives endpoint URLs and optional endpoint credentials, runs
+infrastructure: it receives one endpoint URL and optional endpoint credentials, runs
 Docker-backed evaluations, and serves run artifacts.
 
 ```bash
