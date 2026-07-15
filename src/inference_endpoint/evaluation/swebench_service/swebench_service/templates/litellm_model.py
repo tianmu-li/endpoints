@@ -20,7 +20,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
-from urllib.parse import urlparse
 
 import litellm
 from minisweagent.models import GLOBAL_MODEL_STATS
@@ -36,34 +35,6 @@ from minisweagent.models.utils.retry import retry
 from pydantic import BaseModel
 
 logger = logging.getLogger("litellm_model")
-
-
-_PROXY_ENV_VARS = (
-    "http_proxy",
-    "https_proxy",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "all_proxy",
-    "ALL_PROXY",
-)
-
-
-def _is_loopback_api_base(api_base: str | None) -> bool:
-    if not api_base:
-        return False
-    return urlparse(api_base).hostname in {"localhost", "127.0.0.1", "::1"}
-
-
-def _disable_proxy_env_for_loopback() -> None:
-    for name in _PROXY_ENV_VARS:
-        os.environ.pop(name, None)
-    no_proxy = {"127.0.0.1", "localhost", "::1"}
-    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
-    if existing:
-        no_proxy.update(part.strip() for part in existing.split(",") if part.strip())
-    no_proxy_value = ",".join(sorted(no_proxy))
-    os.environ["NO_PROXY"] = no_proxy_value
-    os.environ["no_proxy"] = no_proxy_value
 
 
 class LitellmModelConfig(BaseModel):
@@ -102,8 +73,6 @@ class LitellmModel:
 
     def __init__(self, *, config_class: Callable = LitellmModelConfig, **kwargs):
         self.config = config_class(**kwargs)
-        if _is_loopback_api_base(self.config.model_kwargs.get("api_base")):
-            _disable_proxy_env_for_loopback()
         if (
             self.config.litellm_model_registry
             and Path(self.config.litellm_model_registry).is_file()

@@ -3,6 +3,7 @@
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 import msgspec.json
@@ -19,7 +20,12 @@ _SERVICE_ROOT = (
 sys.path.insert(0, str(_SERVICE_ROOT))
 
 from swebench_service import runner as runner_mod  # noqa: E402
-from swebench_service.runner import RunnerError, SwebenchRunner  # noqa: E402
+from swebench_service.runner import (  # noqa: E402
+    CancellationToken,
+    RunCancelled,
+    RunnerError,
+    SwebenchRunner,
+)
 from swebench_service.schemas import RunRequest  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -40,9 +46,93 @@ def _request(endpoints: list[str]) -> RunRequest:
     )
 
 
+def test_run_subprocess_streams_output_to_log(tmp_path):
+    log_path = tmp_path / "subprocess.log"
+
+    runner_mod._run_subprocess(
+        [sys.executable, "-c", "print('first'); print('second')"],
+        log_path,
+        cwd=tmp_path,
+        timeout_s=5,
+    )
+
+    assert log_path.read_text() == "first\nsecond\n"
+
+
+def test_run_subprocess_reports_bounded_failure_tail(tmp_path):
+    log_path = tmp_path / "subprocess.log"
+    script = (
+        "import sys\n"
+        "print('early-marker')\n"
+        "for i in range(700): print(f'{i:04d}-' + 'x' * 100)\n"
+        "print('final-marker')\n"
+        "sys.exit(7)\n"
+    )
+
+    with pytest.raises(RunnerError, match="exited with code 7") as exc_info:
+        runner_mod._run_subprocess(
+            [sys.executable, "-c", script],
+            log_path,
+            cwd=tmp_path,
+            timeout_s=5,
+        )
+
+    assert "early-marker" in log_path.read_text()
+    failure_tail = str(exc_info.value).partition("\n")[2]
+    assert "final-marker" in failure_tail
+    assert "early-marker" not in failure_tail
+
+
+def test_run_subprocess_timeout_preserves_partial_log(tmp_path):
+    log_path = tmp_path / "subprocess.log"
+
+    with pytest.raises(RunnerError, match="timed out after 1s"):
+        runner_mod._run_subprocess(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('started', flush=True); time.sleep(30)",
+            ],
+            log_path,
+            cwd=tmp_path,
+            timeout_s=1,
+        )
+
+    assert log_path.read_text() == "started\n"
+
+
+def test_run_subprocess_cancellation_preserves_partial_log(tmp_path):
+    log_path = tmp_path / "subprocess.log"
+    cancel_token = CancellationToken()
+    cancel_timer = threading.Timer(0.2, cancel_token.cancel)
+    cancel_timer.start()
+    try:
+        with pytest.raises(RunCancelled, match="subprocess cancelled"):
+            runner_mod._run_subprocess(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; print('started', flush=True); time.sleep(30)",
+                ],
+                log_path,
+                cwd=tmp_path,
+                timeout_s=5,
+                cancel_token=cancel_token,
+            )
+    finally:
+        cancel_timer.cancel()
+        cancel_timer.join()
+
+    assert log_path.read_text() == "started\n"
+
+
 def test_base_env_keeps_proxies_and_sets_no_proxy_for_loopback(monkeypatch, tmp_path):
     monkeypatch.setenv("http_proxy", "http://proxy.example:8080")
     monkeypatch.setenv("https_proxy", "http://proxy.example:8080")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("all_proxy", "socks5://proxy.example:1080")
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example:1080")
     monkeypatch.setenv("NO_PROXY", "intel.com")
 
     runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
@@ -50,6 +140,10 @@ def test_base_env_keeps_proxies_and_sets_no_proxy_for_loopback(monkeypatch, tmp_
 
     assert env["http_proxy"] == "http://proxy.example:8080"
     assert env["https_proxy"] == "http://proxy.example:8080"
+    assert env["HTTP_PROXY"] == "http://proxy.example:8080"
+    assert env["HTTPS_PROXY"] == "http://proxy.example:8080"
+    assert env["all_proxy"] == "socks5://proxy.example:1080"
+    assert env["ALL_PROXY"] == "socks5://proxy.example:1080"
     assert {"127.0.0.1", "localhost", "intel.com"} <= set(env["NO_PROXY"].split(","))
     assert env["NO_PROXY"] == env["no_proxy"]
 

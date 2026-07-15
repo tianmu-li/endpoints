@@ -187,6 +187,15 @@ class AccuracyConfiguration:
     dataset_type: DatasetType = DatasetType.ACCURACY
 
 
+def _effective_external_sample_count(
+    eval_cfg: AccuracyConfiguration,
+) -> int | None:
+    count = eval_cfg.scorer.external_sample_count(eval_cfg.extras)
+    if count is None:
+        return None
+    return min(count, eval_cfg.dataset.num_samples())
+
+
 @dataclass
 class BenchmarkContext:
     """All state needed to run a benchmark, created by setup_benchmark.
@@ -567,7 +576,7 @@ def setup_benchmark(
         logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
     for ec in eval_configs:
         if ec.scorer.SKIP_ENDPOINT_PHASE:
-            n = ec.scorer.external_sample_count(ec.extras)
+            n = _effective_external_sample_count(ec)
             if n is not None:
                 logger.info(
                     "Accuracy dataset '%s' (%s): %d instances evaluated externally",
@@ -1516,7 +1525,7 @@ def _score_accuracy(
         else:
             total_samples = unit_samples * num_repeats
         if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
-            ext = eval_cfg.scorer.external_sample_count(eval_cfg.extras)
+            ext = _effective_external_sample_count(eval_cfg)
             if ext is not None:
                 unit_samples = ext
                 total_samples = ext

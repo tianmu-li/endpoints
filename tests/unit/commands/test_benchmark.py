@@ -1876,10 +1876,13 @@ class TestFinalizeBenchmark:
         assert results["accuracy_scores"][0]["score"] == 1.0
 
     @pytest.mark.unit
-    def test_skip_endpoint_phase_scorer_reports_external_sample_count(self, tmp_path):
-        """num_samples reflects the scorer's declared count, not the full dataset."""
+    @pytest.mark.parametrize(("dataset_size", "expected"), [(3, 2), (1, 1)])
+    def test_skip_endpoint_phase_scorer_reports_external_sample_count(
+        self, tmp_path, dataset_size, expected
+    ):
+        """External sample counts are bounded by the loaded dataset."""
         config = OfflineConfig(**_OFFLINE_KWARGS)
-        dataset = _make_loaded_dataset()
+        dataset = _make_loaded_dataset(dataset_size)
         ctx = _make_benchmark_context(
             config=config,
             report_dir=tmp_path,
@@ -1896,8 +1899,8 @@ class TestFinalizeBenchmark:
             (tmp_path / "accuracy" / "accuracy_results.json").read_text()
         )
         assert results["accuracy_scores"][0]["dataset_name"] == "external_accuracy"
-        assert results["accuracy_scores"][0]["unit_samples"] == 2
-        assert results["accuracy_scores"][0]["total_samples"] == 2
+        assert results["accuracy_scores"][0]["unit_samples"] == expected
+        assert results["accuracy_scores"][0]["total_samples"] == expected
 
 
 class TestScorerMethodSync:
@@ -2393,7 +2396,8 @@ class TestSetupBenchmarkExternalSampleCountLogging:
             setup_benchmark(config, TestMode.ACC)
 
         assert any(
-            "external_accuracy" in message and "evaluated externally" in message
+            "external_accuracy" in message
+            and "1 instances evaluated externally" in message
             for message in caplog.messages
         )
 

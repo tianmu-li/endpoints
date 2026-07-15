@@ -78,6 +78,9 @@ TEMPLATE_FILES: dict[TemplateName, str] = {
     "qwen_tools": "swebench_qwen_tools_template.yaml",
 }
 
+_LOG_TAIL_MAX_BYTES = 64 * 1024
+_LOG_TAIL_MAX_LINES = 50
+
 
 def _normalize_endpoint_base(endpoint: str) -> str:
     base = endpoint.rstrip("/")
@@ -129,47 +132,55 @@ def _run_subprocess(
     if cancel_token is not None and cancel_token.is_cancelled():
         raise RunCancelled(f"subprocess cancelled before start: {cmd}")
     process: subprocess.Popen[str] | None = None
-    output = ""
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(cwd),
-            env=env,
-            start_new_session=os.name != "nt",
-        )
-        if cancel_token is not None:
-            cancel_token.attach(process)
-        deadline = time.monotonic() + timeout_s
-        while True:
-            if cancel_token is not None and cancel_token.is_cancelled():
-                _terminate_process(process)
-                output, _ = process.communicate()
-                log_path.write_text(output or "")
-                raise RunCancelled(f"subprocess cancelled: {cmd}")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _terminate_process(process)
-                output, _ = process.communicate()
-                log_path.write_text(output or "")
-                raise RunnerError(f"subprocess timed out after {timeout_s}s: {cmd}")
-            try:
-                output, _ = process.communicate(timeout=min(0.5, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
+        with log_path.open("w", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(cwd),
+                env=env,
+                start_new_session=os.name != "nt",
+            )
+            if cancel_token is not None:
+                cancel_token.attach(process)
+            deadline = time.monotonic() + timeout_s
+            while True:
+                if cancel_token is not None and cancel_token.is_cancelled():
+                    _terminate_process(process)
+                    process.communicate()
+                    raise RunCancelled(f"subprocess cancelled: {cmd}")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _terminate_process(process)
+                    process.communicate()
+                    raise RunnerError(f"subprocess timed out after {timeout_s}s: {cmd}")
+                try:
+                    process.communicate(timeout=min(0.5, remaining))
+                    if cancel_token is not None and cancel_token.is_cancelled():
+                        raise RunCancelled(f"subprocess cancelled: {cmd}")
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     finally:
         if process is not None and cancel_token is not None:
             cancel_token.detach(process)
 
-    log_path.write_text(output or "")
     if process.returncode != 0:
-        tail = "\n".join((output or "").splitlines()[-50:])
+        with log_path.open("rb") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            size = log_file.tell()
+            log_file.seek(max(0, size - _LOG_TAIL_MAX_BYTES))
+            tail_bytes = log_file.read()
+        tail = "\n".join(
+            tail_bytes.decode("utf-8", errors="replace").splitlines()[
+                -_LOG_TAIL_MAX_LINES:
+            ]
+        )
         raise RunnerError(
             f"subprocess exited with code {process.returncode}: {cmd}\n{tail}"
         )
