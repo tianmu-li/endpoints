@@ -555,7 +555,7 @@ def setup_benchmark(
     total_samples += sum(
         ec.dataset.num_samples() * ec.dataset.repeats
         for ec in eval_configs
-        if not ec.scorer.SKIP_ENDPOINT_PHASE and ec.dataset_name != "performance"
+        if not ec.scorer.SKIP_ENDPOINT_PHASE and ec.dataset_type == DatasetType.ACCURACY
     )
 
     collect_responses = test_mode in (TestMode.ACC, TestMode.BOTH)

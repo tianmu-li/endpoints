@@ -524,9 +524,18 @@ class TestSWEBenchScorerScore:
 
         assert not (report_dir / "preds.json").exists()
 
-    def test_downloaded_artifact_is_namespaced_by_run_id(self, report_dir, monkeypatch):
+    def test_downloaded_artifact_is_streamed_and_namespaced(
+        self, report_dir, monkeypatch
+    ):
+        target = report_dir / "swe_bench_runs" / "run-1" / "preds.json"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"stale")
         response = MagicMock()
-        response.__enter__.return_value.read.return_value = b'{"prediction":"patch"}'
+        response.__enter__.return_value.read.side_effect = [
+            b'{"prediction":',
+            b'"patch"}',
+            b"",
+        ]
         monkeypatch.setattr(
             scoring_mod.urllib_request, "urlopen", MagicMock(return_value=response)
         )
@@ -541,10 +550,39 @@ class TestSWEBenchScorerScore:
             "run-1",
         )
 
-        assert (
-            report_dir / "swe_bench_runs" / "run-1" / "preds.json"
-        ).read_bytes() == b'{"prediction":"patch"}'
+        read_calls = response.__enter__.return_value.read.call_args_list
+        assert [call.args for call in read_calls] == [(1024 * 1024,)] * 3
+        assert target.read_bytes() == b'{"prediction":"patch"}'
+        assert not target.with_suffix(".json.tmp").exists()
         assert not (report_dir / "preds.json").exists()
+
+    def test_interrupted_artifact_download_preserves_existing_target(
+        self, report_dir, monkeypatch
+    ):
+        target = report_dir / "swe_bench_runs" / "run-1" / "preds.json"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"stale")
+        response = MagicMock()
+        response.__enter__.return_value.read.side_effect = [
+            b"partial",
+            OSError("download interrupted"),
+        ]
+        monkeypatch.setattr(
+            scoring_mod.urllib_request, "urlopen", MagicMock(return_value=response)
+        )
+
+        SWEBenchScorer._download_artifact(
+            "http://service-host:18080/",
+            {
+                "name": "preds.json",
+                "url": "/v1/runs/run-1/artifacts/preds.json",
+            },
+            report_dir,
+            "run-1",
+        )
+
+        assert target.read_bytes() == b"stale"
+        assert not target.with_suffix(".json.tmp").exists()
 
     def test_artifact_result_fallback(self, report_dir, monkeypatch):
         result_path = report_dir / "swe_bench_runs" / "run-1" / "swe_bench_results.json"

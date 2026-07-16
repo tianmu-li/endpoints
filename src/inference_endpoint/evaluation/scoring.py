@@ -1916,13 +1916,20 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         )
         if auth_token:
             req.add_header("Authorization", f"Bearer {auth_token}")
+        tmp = target.with_suffix(target.suffix + ".tmp")
         try:
-            with urllib_request.urlopen(req, timeout=60.0) as resp:
-                target.write_bytes(resp.read())
+            with (
+                urllib_request.urlopen(req, timeout=60.0) as resp,
+                tmp.open("wb") as output,
+            ):
+                shutil.copyfileobj(resp, output, length=1024 * 1024)
+            os.replace(tmp, target)
         except Exception:
             logger.warning(
                 "Could not download SWE-bench artifact %s", name, exc_info=True
             )
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @classmethod
     def _download_artifacts(

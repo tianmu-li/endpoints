@@ -2185,9 +2185,8 @@ class TestSetupBenchmarkTokenizer:
         assert ctx.tokenizer_name is None
 
 
-class TestSetupBenchmarkAccuracySingleStream:
-    """`setup_benchmark` forces single-stream for accuracy-only runs and bakes it
-    into the persisted config so the compliance single_stream gate passes."""
+class TestSetupBenchmark:
+    """Tests for setup-time config normalization and sample accounting."""
 
     @pytest.fixture()
     def _base_patches(self):
@@ -2224,6 +2223,14 @@ class TestSetupBenchmarkAccuracySingleStream:
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         )
 
+    def _setup(self, config, test_mode, loaded_datasets, rt_settings):
+        with (
+            patch.object(execute_mod, "_check_tokenizer_exists", return_value=True),
+            patch.object(execute_mod, "_load_datasets", return_value=loaded_datasets),
+            patch.object(RuntimeSettings, "from_config", return_value=rt_settings),
+        ):
+            return setup_benchmark(config, test_mode)
+
     @pytest.mark.unit
     def test_accuracy_only_normalizes_client_and_target_concurrency(
         self, tmp_path, _base_patches, _simple_dataset, _rt_settings
@@ -2241,21 +2248,12 @@ class TestSetupBenchmarkAccuracySingleStream:
             ),
             report_dir=str(tmp_path),
         )
-        with (
-            patch(
-                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
-                return_value=True,
-            ),
-            patch(
-                "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
-            ),
-            patch(
-                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
-                return_value=_rt_settings,
-            ),
-        ):
-            ctx = setup_benchmark(config, TestMode.ACC)
+        ctx = self._setup(
+            config,
+            TestMode.ACC,
+            (_simple_dataset, [], []),
+            _rt_settings,
+        )
 
         assert ctx.config.settings.client.num_workers == 1
         assert ctx.config.settings.client.max_connections == 1
@@ -2278,24 +2276,42 @@ class TestSetupBenchmarkAccuracySingleStream:
             ),
             report_dir=str(tmp_path),
         )
-        with (
-            patch(
-                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
-                return_value=True,
-            ),
-            patch(
-                "inference_endpoint.commands.benchmark.execute._load_datasets",
-                return_value=(_simple_dataset, [], []),
-            ),
-            patch(
-                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
-                return_value=_rt_settings,
-            ),
-        ):
-            ctx = setup_benchmark(config, TestMode.PERF)
+        ctx = self._setup(
+            config,
+            TestMode.PERF,
+            (_simple_dataset, [], []),
+            _rt_settings,
+        )
 
         assert ctx.config.settings.client.num_workers == 4
         assert ctx.config.settings.load_pattern.target_concurrency == 10
+
+    @pytest.mark.unit
+    def test_accuracy_dataset_named_performance_is_counted_by_type(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        accuracy_dataset = Dataset(pd.DataFrame({"prompt": ["q0", "q1"]}), repeats=2)
+        accuracy_dataset.load()
+        eval_config = AccuracyConfiguration(
+            scorer=Scorer.get("pass_at_1"),
+            extractor=None,
+            dataset_name="performance",
+            dataset=accuracy_dataset,
+            report_dir=tmp_path,
+            ground_truth_column=None,
+            num_repeats=2,
+            dataset_type=DatasetType.ACCURACY,
+        )
+
+        ctx = self._setup(
+            config,
+            TestMode.BOTH,
+            (_simple_dataset, [accuracy_dataset], [eval_config]),
+            _rt_settings,
+        )
+
+        assert ctx.total_samples == 5
 
 
 class TestReportConfigSecretRedaction:

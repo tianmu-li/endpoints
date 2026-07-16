@@ -36,13 +36,14 @@ class SWEBench(
 
     Loads instance IDs and problem statements from the SWE-bench Verified or
     Lite subset. Used as the accuracy dataset for the swe_bench_scorer, which
-    runs mini-swe-agent against a live endpoint and grades patches with the
-    SWE-bench evaluation harness.
+    submits the selected instances and endpoint configuration to a remote
+    SWE-bench service. The service runs mini-swe-agent against the endpoint and
+    grades patches with the SWE-bench evaluation harness.
 
     The ``instance_id`` column identifies which instances mini-swe-agent will
     evaluate. The endpoint phase is skipped entirely for this scorer
-    (``SKIP_ENDPOINT_PHASE=True``); ``SWEBenchScorer`` drives the agent
-    subprocess directly against the configured endpoint.
+    (``SKIP_ENDPOINT_PHASE=True``); ``SWEBenchScorer`` submits a service run
+    instead of launching an agent subprocess locally.
 
     Using this dataset as a performance dataset (type: performance) is not
     meaningful — problem statements sent directly to the model without an
