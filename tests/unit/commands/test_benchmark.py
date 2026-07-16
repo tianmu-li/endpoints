@@ -2250,6 +2250,64 @@ class TestSetupBenchmarkAccuracySingleStream:
         assert ctx.config.settings.load_pattern.target_concurrency == 10
 
 
+class TestReportConfigSecretRedaction:
+    @pytest.mark.unit
+    @pytest.mark.parametrize("test_mode", [TestMode.PERF, TestMode.ACC])
+    def test_report_config_redacts_secrets_without_mutating_runtime(
+        self, tmp_path, test_mode
+    ):
+        endpoint_key = "sentinel-endpoint-key"
+        service_token = "sentinel-service-token"
+        config = OfflineConfig(
+            endpoint_config={
+                "endpoints": ["http://endpoint:8000"],
+                "api_key": endpoint_key,
+            },
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "path": "unused.jsonl",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "extras": {
+                            "swebench_service_url": "http://service:18080",
+                            "swebench_service_auth_token": service_token,
+                        },
+                    },
+                }
+            ],
+            report_dir=str(tmp_path),
+        )
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(None, [], []),
+            ),
+        ):
+            ctx = setup_benchmark(config, test_mode)
+
+        persisted = (tmp_path / "config.yaml").read_text()
+        assert endpoint_key not in persisted
+        assert service_token not in persisted
+        assert persisted.count("<redacted>") >= 2
+        assert ctx.config.endpoint_config.api_key == endpoint_key
+        assert (
+            ctx.config.datasets[0].accuracy_config.extras["swebench_service_auth_token"]
+            == service_token
+        )
+
+
 class _FakeTimerHandle:
     def __init__(self) -> None:
         self.cancelled = False
@@ -2586,11 +2644,27 @@ class _OverrideTestBase:
         unmodified perf dataset keeps the global 1024."""
         perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(
-            perf_path, acc_path, acc_override={"max_new_tokens": 32768}
+            perf_path,
+            acc_path,
+            acc_override={
+                "temperature": 0.2,
+                "seed": 7,
+                "max_new_tokens": 32768,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
         )
-        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.BOTH)
+        perf_ds, acc_datasets, eval_configs = _load_datasets(
+            config, tmp_path, TestMode.BOTH
+        )
         assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
         assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+        assert eval_configs[0].model_params.max_new_tokens == 32768
+        assert eval_configs[0].model_params.temperature == 0.2
+        assert eval_configs[0].model_params.seed == 7
+        assert eval_configs[0].model_params.chat_template_kwargs == {
+            "enable_thinking": False
+        }
+        assert eval_configs[0].endpoint_config is config.endpoint_config
 
     @pytest.mark.unit
     def test_no_override_inherits_global(self, tmp_path):

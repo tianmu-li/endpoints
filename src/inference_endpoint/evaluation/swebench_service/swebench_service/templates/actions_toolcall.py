@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Portions of this file are derived from mini-swe-agent v2.3.0.
+# See MINI_SWE_AGENT_LICENSE.md in this directory for the upstream MIT notice.
+
 """Parse actions & format observations with toolcalls"""
 
 import base64

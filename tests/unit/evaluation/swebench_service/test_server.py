@@ -107,19 +107,23 @@ class CancellationAwareRunner:
     def __init__(self):
         self.started = threading.Event()
         self.cancelled = threading.Event()
+        self.cleaned = threading.Event()
 
     def run(self, request, run_dir: Path, cancel_token=None):
-        self.started.set()
-        deadline = time.monotonic() + 5
-        while (
-            cancel_token is not None
-            and not cancel_token.is_cancelled()
-            and time.monotonic() < deadline
-        ):
-            time.sleep(0.01)
-        if cancel_token is not None and cancel_token.is_cancelled():
-            self.cancelled.set()
-        return {"resolved_instances": 0, "submitted_instances": 0}
+        try:
+            self.started.set()
+            deadline = time.monotonic() + 5
+            while (
+                cancel_token is not None
+                and not cancel_token.is_cancelled()
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            if cancel_token is not None and cancel_token.is_cancelled():
+                self.cancelled.set()
+            return {"resolved_instances": 0, "submitted_instances": 0}
+        finally:
+            self.cleaned.set()
 
 
 def _payload() -> dict:
@@ -357,6 +361,7 @@ async def test_shutdown_cancels_active_runs(tmp_path):
     await client.close()
 
     assert await asyncio.to_thread(runner.cancelled.wait, 2)
+    assert await asyncio.to_thread(runner.cleaned.wait, 2)
 
 
 @pytest.mark.asyncio

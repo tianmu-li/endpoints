@@ -29,7 +29,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urljoin, urlparse
@@ -38,7 +38,6 @@ import msgspec
 import msgspec.json
 import numpy as np
 import pandas as pd
-import yaml
 from pydantic import ValidationError
 from tqdm import tqdm
 
@@ -61,11 +60,15 @@ from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from ..dataset_manager.predefined.swe_bench import SWEBench
 from ..exceptions import SetupError
+from ..utils.atomic_write import atomic_write_bytes
 from .accuracy_results import build_breakdown
 from .extractor import (
     Extractor,
     PythonCodeExtractor,
 )
+
+if TYPE_CHECKING:
+    from ..config.schema import EndpointConfig, ModelParams
 
 logger = logging.getLogger(__name__)
 
@@ -1768,6 +1771,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         swebench_template: str | None = None,
         service_timeout_s: int | None = None,
         poll_interval_s: float | None = None,
+        model_params: "ModelParams | None" = None,
+        endpoint_config: "EndpointConfig | None" = None,
     ):
         ground_truth_column = ground_truth_column or "instance_id"
         super().__init__(
@@ -1804,6 +1809,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         self.swebench_template = options["swebench_template"]
         self.service_timeout_s = options["service_timeout_s"]
         self.poll_interval_s = options["poll_interval_s"]
+        self.model_params = model_params
+        self.endpoint_config = endpoint_config
 
     @classmethod
     def _normalize_service_url(cls, value: Any) -> str:
@@ -1902,7 +1909,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         ):
             logger.warning("Ignoring unsafe SWE-bench artifact URL for %s", name)
             return
-        target = report_dir / name
+        target_dir = report_dir / "swe_bench_runs" / run_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / name
         url = urljoin(service_url, href.lstrip("/"))
         req = urllib_request.Request(
             url, headers={"Accept": "application/octet-stream"}
@@ -1959,7 +1968,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @staticmethod
     def _write_service_status(report_dir: Path, status: dict[str, Any]) -> None:
-        (report_dir / "swe_bench_service_status.json").write_bytes(
+        run_id = str(status.get("run_id") or "")
+        if not run_id:
+            return
+        run_dir = report_dir / "swe_bench_runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "swe_bench_service_status.json").write_bytes(
             msgspec.json.encode(status)
         )
 
@@ -2187,9 +2201,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         return options
 
     @staticmethod
-    def _generation_params(model_params: dict[str, Any]) -> dict[str, Any]:
+    def _generation_params(model_params: "ModelParams") -> dict[str, Any]:
         fields = (
             "temperature",
+            "seed",
             "top_p",
             "top_k",
             "repetition_penalty",
@@ -2198,7 +2213,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "max_new_tokens",
             "chat_template_kwargs",
         )
-        return {field: model_params[field] for field in fields if field in model_params}
+        dumped = model_params.model_dump(exclude_none=True)
+        return {field: dumped[field] for field in fields if field in dumped}
 
     @classmethod
     def dataset_loader_kwargs(cls, extras: dict[str, Any]) -> dict[str, Any]:
@@ -2235,26 +2251,17 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     def score(self) -> tuple[float | None, int]:
         """Submit a SWE-bench service run. Returns (resolved_rate, 1)."""
         self.complete = True
-        config_path = self.report_dir / "config.yaml"
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"config.yaml not found at {config_path}. "
-                "SWEBenchScorer.score() must be called from within a benchmark run "
-                "that has already written its config, or the path must be pre-populated."
-            )
-        with config_path.open() as f:
-            benchmark_cfg = yaml.safe_load(f)
-        if not isinstance(benchmark_cfg, dict):
+        if self.model_params is None:
             raise ValueError(
-                f"benchmark config at {config_path} must be a YAML mapping"
+                "model_params must be provided when constructing SWEBenchScorer"
             )
-
-        model_params = benchmark_cfg.get("model_params") or {}
-        model_name = model_params.get("name")
+        if self.endpoint_config is None:
+            raise ValueError(
+                "endpoint_config must be provided when constructing SWEBenchScorer"
+            )
+        model_name = self.model_params.name
         if not model_name:
-            raise ValueError(
-                "model_params.name is required in the benchmark config but is missing or empty"
-            )
+            raise ValueError("model_params.name is required but is missing or empty")
         if self.dataset.dataframe is None:
             raise RuntimeError(
                 "SWEBench dataset must be loaded before scoring; call dataset.load() first."
@@ -2280,8 +2287,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             self.complete = False
             return None, 1
 
-        endpoint_config = benchmark_cfg.get("endpoint_config") or {}
-        endpoint_urls = endpoint_config.get("endpoints") or []
+        endpoint_urls = self.endpoint_config.endpoints
         if len(endpoint_urls) != 1:
             raise SetupError(
                 "SWE-bench service mode supports exactly one endpoint URL; "
@@ -2290,8 +2296,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         payload: dict[str, Any] = {
             "model_name": model_name,
             "endpoint_urls": endpoint_urls,
-            "endpoint_api_key": endpoint_config.get("api_key"),
-            "generation_params": self._generation_params(model_params),
+            "endpoint_api_key": self.endpoint_config.api_key,
+            "generation_params": self._generation_params(self.model_params),
             "subset": self.subset,
             "split": self.split,
             "num_instances": total_instances,
@@ -2304,6 +2310,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         run_id = ""
         progress_state: dict[str, Any] = {}
+        result_path = self.report_dir / "swe_bench_results.json"
+        result_path.unlink(missing_ok=True)
         try:
             submitted = type(self)._http_json(
                 urljoin(self.swebench_service_url, "v1/runs"),
@@ -2369,10 +2377,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             return None, 1
 
         result = status.get("result")
-        result_path = self.report_dir / "swe_bench_results.json"
-        if result is None and result_path.exists():
+        run_result_path = (
+            self.report_dir / "swe_bench_runs" / run_id / "swe_bench_results.json"
+        )
+        if result is None and run_result_path.exists():
             try:
-                result = msgspec.json.decode(result_path.read_bytes(), type=dict)
+                result = msgspec.json.decode(run_result_path.read_bytes(), type=dict)
             except msgspec.DecodeError:
                 self.complete = False
                 return None, 1
@@ -2380,8 +2390,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             logger.error("SWE-bench service run %s did not return a result", run_id)
             self.complete = False
             return None, 1
-        if not result_path.exists():
-            result_path.write_bytes(msgspec.json.encode(result))
+        atomic_write_bytes(result_path, msgspec.json.encode(result))
 
         submitted_count = result.get("submitted_instances") or 0
         resolved = result.get("resolved_instances") or 0

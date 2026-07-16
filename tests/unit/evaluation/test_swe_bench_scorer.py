@@ -10,9 +10,9 @@ from unittest.mock import MagicMock
 import msgspec
 import pandas as pd
 import pytest
-import yaml
 
 # isort: split
+from inference_endpoint.config.schema import EndpointConfig, ModelParams
 from inference_endpoint.evaluation import scoring as scoring_mod
 from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
 from inference_endpoint.exceptions import SetupError
@@ -47,27 +47,6 @@ class FakeTqdm:
         self.closed = True
 
 
-def _write_benchmark_config(
-    report_dir: Path,
-    model_params: dict | None = None,
-    endpoint_urls: list[str] | None = None,
-) -> None:
-    mp: dict = {"name": _MODEL_NAME}
-    if model_params is not None:
-        mp.update(model_params)
-    (report_dir / "config.yaml").write_text(
-        yaml.dump(
-            {
-                "model_params": mp,
-                "endpoint_config": {
-                    "endpoints": endpoint_urls or ["http://endpoint-host:30000"],
-                    "api_key": "secret-key",
-                },
-            }
-        )
-    )
-
-
 def _write_sample_idx_map(report_dir: Path, n: int = 3) -> None:
     idx_map = {_DATASET_NAME: {f"uuid-{i}": i for i in range(n)}}
     (report_dir / "sample_idx_map.json").write_bytes(msgspec.json.encode(idx_map))
@@ -86,12 +65,31 @@ def _make_dataset(n: int = 3) -> MagicMock:
 
 
 def _make_scorer(report_dir: Path, *, dataset=None, **kwargs) -> SWEBenchScorer:
+    model_params = kwargs.pop(
+        "model_params",
+        ModelParams(
+            name=_MODEL_NAME,
+            temperature=0.25,
+            seed=17,
+            max_new_tokens=4096,
+            chat_template_kwargs={"enable_thinking": False},
+        ),
+    )
+    endpoint_config = kwargs.pop(
+        "endpoint_config",
+        EndpointConfig(
+            endpoints=["http://endpoint-host:30000"],
+            api_key="secret-key",
+        ),
+    )
     return SWEBenchScorer(
         dataset_name=_DATASET_NAME,
         dataset=dataset or _make_dataset(),
         report_dir=report_dir,
         swebench_service_url="http://service-host:18080",
         poll_interval_s=0.01,
+        model_params=model_params,
+        endpoint_config=endpoint_config,
         **kwargs,
     )
 
@@ -100,7 +98,6 @@ def _make_scorer(report_dir: Path, *, dataset=None, **kwargs) -> SWEBenchScorer:
 def report_dir(tmp_path: Path) -> Path:
     d = tmp_path / "report"
     d.mkdir()
-    _write_benchmark_config(d)
     _write_sample_idx_map(d)
     return d
 
@@ -252,7 +249,12 @@ class TestSWEBenchScorerScore:
         assert "benchmark_config" not in payloads[0]
         assert payloads[0]["endpoint_urls"] == ["http://endpoint-host:30000"]
         assert payloads[0]["endpoint_api_key"] == "secret-key"
-        assert payloads[0]["generation_params"] == {}
+        assert payloads[0]["generation_params"] == {
+            "temperature": 0.25,
+            "seed": 17,
+            "max_new_tokens": 4096,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
         assert payloads[0]["template"] == "default"
         assert (report_dir / "swe_bench_results.json").exists()
 
@@ -328,12 +330,11 @@ class TestSWEBenchScorerScore:
         ) in calls
 
     def test_score_rejects_multiple_endpoint_urls(self, report_dir, monkeypatch):
-        _write_benchmark_config(
-            report_dir,
-            endpoint_urls=["http://endpoint-a:30000", "http://endpoint-b:30000"],
+        endpoint_config = EndpointConfig(
+            endpoints=["http://endpoint-a:30000", "http://endpoint-b:30000"]
         )
         monkeypatch.setattr(SWEBenchScorer, "_http_json", MagicMock())
-        scorer = _make_scorer(report_dir)
+        scorer = _make_scorer(report_dir, endpoint_config=endpoint_config)
 
         with pytest.raises(SetupError, match="exactly one endpoint URL"):
             scorer.score()
@@ -523,8 +524,30 @@ class TestSWEBenchScorerScore:
 
         assert not (report_dir / "preds.json").exists()
 
+    def test_downloaded_artifact_is_namespaced_by_run_id(self, report_dir, monkeypatch):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"prediction":"patch"}'
+        monkeypatch.setattr(
+            scoring_mod.urllib_request, "urlopen", MagicMock(return_value=response)
+        )
+
+        SWEBenchScorer._download_artifact(
+            "http://service-host:18080/",
+            {
+                "name": "preds.json",
+                "url": "/v1/runs/run-1/artifacts/preds.json",
+            },
+            report_dir,
+            "run-1",
+        )
+
+        assert (
+            report_dir / "swe_bench_runs" / "run-1" / "preds.json"
+        ).read_bytes() == b'{"prediction":"patch"}'
+        assert not (report_dir / "preds.json").exists()
+
     def test_artifact_result_fallback(self, report_dir, monkeypatch):
-        result_path = report_dir / "swe_bench_results.json"
+        result_path = report_dir / "swe_bench_runs" / "run-1" / "swe_bench_results.json"
 
         def fake_http_json(url, *, method="GET", payload=None, **kwargs):
             return {
@@ -539,6 +562,7 @@ class TestSWEBenchScorerScore:
             }
 
         def fake_download(service_url, status, output_dir, auth_token=None):
+            result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(
                 json.dumps({"resolved_instances": 1, "submitted_instances": 3})
             )
@@ -549,3 +573,81 @@ class TestSWEBenchScorerScore:
         score, _ = _make_scorer(report_dir).score()
 
         assert score == pytest.approx(1 / 3)
+        assert json.loads((report_dir / "swe_bench_results.json").read_text()) == {
+            "resolved_instances": 1,
+            "submitted_instances": 3,
+        }
+
+    def test_stale_results_outside_current_run_are_not_used(
+        self, report_dir, monkeypatch
+    ):
+        canonical = report_dir / "swe_bench_results.json"
+        canonical.write_text(
+            json.dumps({"resolved_instances": 3, "submitted_instances": 3})
+        )
+        stale_run_result = (
+            report_dir / "swe_bench_runs" / "run-old" / "swe_bench_results.json"
+        )
+        stale_run_result.parent.mkdir(parents=True)
+        stale_run_result.write_text(
+            json.dumps({"resolved_instances": 3, "submitted_instances": 3})
+        )
+        monkeypatch.setattr(
+            SWEBenchScorer,
+            "_http_json",
+            classmethod(
+                lambda cls, url, **kwargs: {
+                    "run_id": "run-current",
+                    "status": "succeeded",
+                    "artifacts": [],
+                }
+            ),
+        )
+
+        score, _ = _make_scorer(report_dir).score()
+
+        assert score is None
+        assert not canonical.exists()
+        assert stale_run_result.exists()
+
+    def test_inline_result_atomically_overwrites_downloaded_result(
+        self, report_dir, monkeypatch
+    ):
+        atomic_writes: list[tuple[Path, dict]] = []
+        real_atomic_write = scoring_mod.atomic_write_bytes
+
+        def spy_atomic_write(path, data):
+            atomic_writes.append((path, msgspec.json.decode(data, type=dict)))
+            real_atomic_write(path, data)
+
+        def fake_http_json(url, *, method="GET", payload=None, **kwargs):
+            return {
+                "run_id": "run-1",
+                "status": "succeeded",
+                "result": {"resolved_instances": 2, "submitted_instances": 3},
+                "artifacts": [],
+            }
+
+        run_result = report_dir / "swe_bench_runs" / "run-1" / "swe_bench_results.json"
+
+        def fake_download(service_url, status, output_dir, auth_token=None):
+            run_result.parent.mkdir(parents=True, exist_ok=True)
+            run_result.write_text(
+                json.dumps({"resolved_instances": 0, "submitted_instances": 3})
+            )
+
+        monkeypatch.setattr(SWEBenchScorer, "_http_json", fake_http_json)
+        monkeypatch.setattr(SWEBenchScorer, "_download_artifacts", fake_download)
+        monkeypatch.setattr(scoring_mod, "atomic_write_bytes", spy_atomic_write)
+
+        score, _ = _make_scorer(report_dir).score()
+
+        canonical = report_dir / "swe_bench_results.json"
+        assert score == pytest.approx(2 / 3)
+        assert atomic_writes == [
+            (
+                canonical,
+                {"resolved_instances": 2, "submitted_instances": 3},
+            )
+        ]
+        assert not canonical.with_suffix(".json.tmp").exists()

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -34,6 +35,8 @@ import yaml
 
 from .artifacts import redact_secrets
 from .schemas import RunRequest, TemplateName
+
+logger = logging.getLogger(__name__)
 
 
 class RunnerError(RuntimeError):
@@ -80,6 +83,7 @@ TEMPLATE_FILES: dict[TemplateName, str] = {
 
 _LOG_TAIL_MAX_BYTES = 64 * 1024
 _LOG_TAIL_MAX_LINES = 50
+_RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
 
 
 def _normalize_endpoint_base(endpoint: str) -> str:
@@ -202,6 +206,30 @@ class SwebenchRunner:
         run_dir: Path,
         cancel_token: CancellationToken | None = None,
     ) -> dict[str, Any]:
+        primary_error: BaseException | None = None
+        try:
+            return self._run(request, run_dir, cancel_token)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                self._cleanup_containers(run_dir.name)
+            except Exception:
+                if primary_error is None:
+                    raise
+                logger.warning(
+                    "Could not clean up SWE-bench Docker containers for run %s",
+                    run_dir.name,
+                    exc_info=True,
+                )
+
+    def _run(
+        self,
+        request: RunRequest,
+        run_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> dict[str, Any]:
         run_dir.mkdir(parents=True, exist_ok=True)
         secret_values = (
             {request.endpoint_api_key} if request.endpoint_api_key else set()
@@ -221,6 +249,7 @@ class SwebenchRunner:
             patched_config = self._patch_config(
                 Path(config_tmp),
                 request,
+                run_id=run_dir.name,
             )
             self._run_agent(request, patched_config, output_dir, run_dir, cancel_token)
 
@@ -253,7 +282,9 @@ class SwebenchRunner:
     def _template_dir(self) -> Path:
         return Path(__file__).resolve().parent / "templates"
 
-    def _patch_config(self, config_dir: Path, request: RunRequest) -> Path:
+    def _patch_config(
+        self, config_dir: Path, request: RunRequest, *, run_id: str
+    ) -> Path:
         cfg = self._load_template(request)
         model_cfg = cfg["model"]
         model_kwargs = model_cfg["model_kwargs"]
@@ -266,15 +297,11 @@ class SwebenchRunner:
             base = ""
             model_kwargs["api_base"] = ""
 
-        if request.endpoint_api_key:
-            model_kwargs["api_key"] = request.endpoint_api_key
-        elif urlparse(base).hostname in {"localhost", "127.0.0.1", "::1"}:
-            model_kwargs["api_key"] = "EMPTY"
-        else:
-            model_kwargs.pop("api_key", None)
+        model_kwargs.pop("api_key", None)
 
         for field in (
             "temperature",
+            "seed",
             "top_p",
             "top_k",
             "repetition_penalty",
@@ -300,6 +327,15 @@ class SwebenchRunner:
             model_kwargs["chat_template_kwargs"] = chat_tmpl
         else:
             model_kwargs.pop("chat_template_kwargs", None)
+
+        environment_cfg = cfg.get("environment")
+        if not isinstance(environment_cfg, dict):
+            raise RunnerError("swebench template must define environment")
+        environment_cfg["run_args"] = [
+            "--rm",
+            "--label",
+            f"{_RUN_LABEL}={run_id}",
+        ]
 
         config_dir.mkdir(parents=True, exist_ok=True)
         patched_path = config_dir / "swebench_patched.yaml"
@@ -370,7 +406,43 @@ class SwebenchRunner:
         no_proxy_value = ",".join(sorted(no_proxy))
         env["NO_PROXY"] = no_proxy_value
         env["no_proxy"] = no_proxy_value
+        endpoint_host = (
+            urlparse(str(request.endpoint_urls[0])).hostname
+            if request.endpoint_urls
+            else None
+        )
+        if request.endpoint_api_key:
+            env["OPENAI_API_KEY"] = request.endpoint_api_key
+        elif endpoint_host in {"localhost", "127.0.0.1", "::1"}:
+            env["OPENAI_API_KEY"] = "EMPTY"
+        else:
+            env.pop("OPENAI_API_KEY", None)
         return env
+
+    def _cleanup_containers(self, run_id: str) -> None:
+        docker = os.getenv("MSWEA_DOCKER_EXECUTABLE", "docker")
+        label_filter = f"label={_RUN_LABEL}={run_id}"
+        try:
+            listed = subprocess.run(
+                [docker, "ps", "-aq", "--filter", label_filter],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            container_ids = listed.stdout.split()
+            if container_ids:
+                subprocess.run(
+                    [docker, "rm", "-f", *container_ids],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RunnerError(
+                f"failed to clean up Docker containers for SWE-bench run {run_id}"
+            ) from exc
 
     def _agent_env(self, request: RunRequest, overlay_root: Path) -> dict[str, str]:
         env = self._base_env(request)

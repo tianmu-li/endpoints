@@ -1401,20 +1401,57 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         return _config_adapter.validate_python(data)
 
-    def to_yaml_file(self, path: Path, exclude_none: bool = True) -> None:
+    @staticmethod
+    def _redact_secret_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized = str(key).strip().lower().replace("-", "_")
+                if (
+                    normalized
+                    in {
+                        "api_key",
+                        "access_token",
+                        "authorization",
+                        "auth_token",
+                        "password",
+                        "token",
+                    }
+                    or normalized.endswith(("_key", "_token", "_password"))
+                    or "secret" in normalized
+                ):
+                    redacted[key] = "<redacted>"
+                else:
+                    redacted[key] = BenchmarkConfig._redact_secret_fields(item)
+            return redacted
+        if isinstance(value, list):
+            return [BenchmarkConfig._redact_secret_fields(item) for item in value]
+        return value
+
+    def to_yaml_file(
+        self,
+        path: Path,
+        exclude_none: bool = True,
+        *,
+        redact_secrets: bool = False,
+    ) -> None:
         """Save BenchmarkConfig to YAML file.
 
         Args:
             path: Path to save YAML file
             exclude_none: Whether to exclude None values (default: True)
+            redact_secrets: Replace secret-like values before persistence.
         """
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self.model_dump(exclude_none=exclude_none, mode="json")
+        if redact_secrets:
+            payload = self._redact_secret_fields(payload)
 
         with open(path, "w") as f:
             yaml.dump(
-                self.model_dump(exclude_none=exclude_none, mode="json"),
+                payload,
                 f,
                 default_flow_style=False,
                 sort_keys=False,

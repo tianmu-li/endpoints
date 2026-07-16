@@ -6,6 +6,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -140,6 +141,20 @@ def test_litellm_model_loopback_preserves_proxy_environment(monkeypatch):
     assert {name: os.environ[name] for name in proxy_vars} == proxy_vars
 
 
+def test_litellm_model_serialization_does_not_capture_environment_api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "trajectory-secret")
+    litellm_model = _load_litellm_model_module(monkeypatch)
+
+    model = litellm_model.LitellmModel(
+        model_name="openai/test-model",
+        model_kwargs={"api_base": "http://127.0.0.1:30000/v1"},
+    )
+
+    serialized = json.dumps(model.serialize())
+    assert "trajectory-secret" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_finish_emits_relative_pathspecs_and_git_add_intent(monkeypatch):
     actions_mod = _load_actions_module(monkeypatch)
 
@@ -211,3 +226,37 @@ def test_str_replace_editor_view_range_rejects_non_integers(monkeypatch):
             ],
             format_error_template="{{ error }}",
         )
+
+
+@pytest.mark.parametrize(
+    ("contents", "old_str", "expected_contents", "succeeds"),
+    [
+        ("before unique after", "unique", "before replaced after", True),
+        ("duplicate duplicate", "duplicate", "duplicate duplicate", False),
+    ],
+)
+def test_str_replace_editor_command_exit_status_tracks_match_count(
+    monkeypatch, tmp_path, contents, old_str, expected_contents, succeeds
+):
+    actions_mod = _load_actions_module(monkeypatch)
+    target = tmp_path / "file.txt"
+    target.write_text(contents)
+
+    action = actions_mod.parse_toolcall_actions(
+        [
+            _tool_call(
+                "str_replace_editor",
+                {
+                    "command": "str_replace",
+                    "path": str(target),
+                    "old_str": old_str,
+                    "new_str": "replaced",
+                },
+            )
+        ],
+        format_error_template="{{ error }}",
+    )[0]
+    result = subprocess.run(action["command"], shell=True, capture_output=True)
+
+    assert (result.returncode == 0) is succeeds
+    assert target.read_text() == expected_contents

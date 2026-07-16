@@ -1,3 +1,5 @@
+# Portions of this template are derived from mini-swe-agent v2.3.0.
+# See MINI_SWE_AGENT_LICENSE.md in this directory for the upstream MIT notice.
 agent:
   system_template: |
     You are a helpful assistant that can interact with a computer shell to solve programming tasks.
@@ -177,7 +179,6 @@ model:
   model_name: ""
   model_kwargs:
     custom_llm_provider: "openai"
-    api_key: "test"
     drop_params: true
     parallel_tool_calls: true
     api_base: ""

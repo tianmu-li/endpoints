@@ -32,7 +32,12 @@ from inference_endpoint.commands.benchmark.execute import (
     _score_accuracy,
 )
 from inference_endpoint.config import schema as config_schema
-from inference_endpoint.config.schema import DatasetType
+from inference_endpoint.config.schema import (
+    DatasetType,
+    EndpointConfig,
+    ModelParams,
+    ScorerMethod,
+)
 
 # Module object for the tests that monkeypatch execute's own module-level symbols
 # (load_reference_backend) so _score_accuracy resolves the patched one. Taken from
@@ -67,6 +72,15 @@ class _FakeScorer:
 
     def score_breakdown(self):
         return None
+
+
+class _FakeSWEBenchScorer(_FakeScorer):
+    SCORER_ID = ScorerMethod.SWE_BENCH.value
+    received_kwargs: dict = {}
+
+    def __init__(self, *args, **kwargs):
+        type(self).received_kwargs = kwargs
+        super().__init__(*args, **kwargs)
 
 
 class _FakeBreakdownScorer(_FakeScorer):
@@ -191,6 +205,41 @@ _RESULT = SimpleNamespace(perf_results=[], phase_results=[])
 
 @pytest.mark.unit
 class TestScoreAccuracy:
+    def test_swebench_receives_typed_runtime_model_and_endpoint(self, tmp_path):
+        model_params = ModelParams(
+            name="test-model",
+            temperature=0.2,
+            seed=7,
+            max_new_tokens=2048,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        endpoint_config = EndpointConfig(
+            endpoints=["http://endpoint:8000"],
+            api_key="runtime-secret",
+        )
+        cfg = AccuracyConfiguration(
+            scorer=_FakeSWEBenchScorer,  # type: ignore[arg-type]
+            extractor=None,
+            dataset_name="swe_bench",
+            dataset=_FakeDataset(1, 1.0),  # type: ignore[arg-type]
+            report_dir=tmp_path,
+            ground_truth_column=None,
+            num_repeats=1,
+            extras={"swebench_service_auth_token": "service-secret"},
+            model_params=model_params,
+            endpoint_config=endpoint_config,
+        )
+
+        _score_accuracy(_ctx([cfg]), _RESULT)
+
+        assert _FakeSWEBenchScorer.received_kwargs == {
+            "extractor": None,
+            "ground_truth_column": None,
+            "swebench_service_auth_token": "service-secret",
+            "model_params": model_params,
+            "endpoint_config": endpoint_config,
+        }
+
     def test_each_dataset_gets_its_own_entry(self, tmp_path):
         cfgs = [
             _cfg("aime25::gptoss", 30, 0.8, tmp_path, repeats=8),

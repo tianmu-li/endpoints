@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -164,21 +165,67 @@ def test_patch_config_rewrites_localhost_api_base_to_127_0_0_1(tmp_path):
     patched = runner._patch_config(
         tmp_path,
         _request(["http://localhost:30000"]),
+        run_id="run-123",
     )
 
     cfg = yaml.safe_load(patched.read_text())
     assert cfg["model"]["model_kwargs"]["api_base"] == "http://127.0.0.1:30000/v1"
-    assert cfg["model"]["model_kwargs"]["api_key"] == "EMPTY"
+    assert "api_key" not in cfg["model"]["model_kwargs"]
+    assert cfg["environment"]["run_args"] == [
+        "--rm",
+        "--label",
+        "com.mlcommons.endpoints.swebench-run=run-123",
+    ]
+
+
+def test_patch_config_keeps_api_key_out_of_yaml_and_forwards_generation(tmp_path):
+    request = _request(["http://endpoint:30000"])
+    request.endpoint_api_key = "real-secret"
+    request.generation_params = {
+        "temperature": 0.2,
+        "seed": 23,
+        "max_new_tokens": 2048,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+
+    patched = runner._patch_config(tmp_path, request, run_id="run-1")
+
+    text = patched.read_text()
+    cfg = yaml.safe_load(text)
+    model_kwargs = cfg["model"]["model_kwargs"]
+    assert "real-secret" not in text
+    assert "api_key" not in model_kwargs
+    assert model_kwargs["temperature"] == 0.2
+    assert model_kwargs["seed"] == 23
+    assert model_kwargs["max_tokens"] == 2048
+    assert model_kwargs["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_base_env_supplies_api_key_only_to_agent_subprocess(monkeypatch, tmp_path):
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    authenticated = _request(["http://endpoint:30000"])
+    authenticated.endpoint_api_key = "real-secret"
+    loopback = _request(["http://localhost:30000"])
+
+    assert runner._base_env(loopback)["OPENAI_API_KEY"] == "EMPTY"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
+    unauthenticated = _request(["http://endpoint:30000"])
+    assert "OPENAI_API_KEY" not in runner._base_env(unauthenticated)
 
 
 def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
     commands: list[list[str]] = []
+    envs: list[dict[str, str]] = []
 
     def fake_run_subprocess(cmd, *args, **kwargs):
         commands.append(cmd)
+        envs.append(kwargs["env"])
 
     monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run_subprocess)
     request = _request(["http://endpoint:30000"])
+    request.endpoint_api_key = "agent-secret"
     request.evaluated_instance_ids = ["repo__repo-1", "repo.with.regex+chars"]
     runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
@@ -189,6 +236,7 @@ def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
     assert cmd[cmd.index("--filter") + 1] == (
         "^(?:repo__repo\\-1|repo\\.with\\.regex\\+chars)$"
     )
+    assert envs[0]["OPENAI_API_KEY"] == "agent-secret"
 
 
 def test_run_agent_toolcall_patch_prepends_overlay_pythonpath(monkeypatch, tmp_path):
@@ -255,3 +303,111 @@ def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
 
     assert result_path.exists()
     assert (run_dir / "swe_bench_eval_run_id.txt").read_text().startswith("endpoints_")
+
+
+def _stub_successful_run(monkeypatch, runner: SwebenchRunner) -> None:
+    def fake_run_agent(request, patched_config, output_dir, run_dir, cancel_token=None):
+        (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
+
+    def fake_run_eval(request, preds_path, output_dir, run_dir, cancel_token=None):
+        result_path = output_dir / "result.json"
+        result_path.write_text('{"resolved_instances":1,"submitted_instances":1}')
+        return result_path
+
+    monkeypatch.setattr(runner, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(runner, "_run_eval", fake_run_eval)
+
+
+def test_run_cleans_labeled_containers_after_success(monkeypatch, tmp_path):
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    _stub_successful_run(monkeypatch, runner)
+    cleaned: list[str] = []
+    monkeypatch.setattr(runner, "_cleanup_containers", cleaned.append)
+
+    result = runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-1")
+
+    assert result == {"resolved_instances": 1, "submitted_instances": 1}
+    assert cleaned == ["run-1"]
+
+
+@pytest.mark.parametrize(
+    ("error", "match"),
+    [
+        (RuntimeError("agent failed"), "agent failed"),
+        (RunnerError("subprocess timed out"), "timed out"),
+        (RunCancelled("subprocess cancelled"), "cancelled"),
+    ],
+)
+def test_run_cleans_labeled_containers_after_failure(
+    monkeypatch, tmp_path, error, match
+):
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    cleaned: list[str] = []
+
+    def fail_agent(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(runner, "_run_agent", fail_agent)
+    monkeypatch.setattr(runner, "_cleanup_containers", cleaned.append)
+
+    with pytest.raises(type(error), match=match):
+        runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-2")
+
+    assert cleaned == ["run-2"]
+
+
+def test_cleanup_failure_fails_successful_run(monkeypatch, tmp_path):
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    _stub_successful_run(monkeypatch, runner)
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_containers",
+        lambda run_id: (_ for _ in ()).throw(RunnerError("cleanup failed")),
+    )
+
+    with pytest.raises(RunnerError, match="cleanup failed"):
+        runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-3")
+
+
+def test_cleanup_failure_does_not_mask_primary_failure(monkeypatch, tmp_path):
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+    monkeypatch.setattr(
+        runner,
+        "_run_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RunCancelled("cancelled")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_containers",
+        lambda run_id: (_ for _ in ()).throw(RunnerError("cleanup failed")),
+    )
+
+    with pytest.raises(RunCancelled, match="cancelled"):
+        runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-4")
+
+
+def test_cleanup_uses_exact_run_label_and_leaves_unrelated_containers(
+    monkeypatch, tmp_path
+):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        stdout = "matched-1\nmatched-2\n" if cmd[1:3] == ["ps", "-aq"] else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    runner = SwebenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+
+    runner._cleanup_containers("run-exact")
+
+    assert calls == [
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "label=com.mlcommons.endpoints.swebench-run=run-exact",
+        ],
+        ["docker", "rm", "-f", "matched-1", "matched-2"],
+    ]

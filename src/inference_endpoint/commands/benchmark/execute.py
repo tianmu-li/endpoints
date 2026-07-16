@@ -73,8 +73,10 @@ from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     DatasetType,
+    EndpointConfig,
     LoadPattern,
     LoadPatternType,
+    ModelParams,
     ProfilerEngine,
     ScorerMethod,
     StreamingMode,
@@ -181,6 +183,8 @@ class AccuracyConfiguration:
     ground_truth_column: str | None
     num_repeats: int
     extras: dict[str, Any] = field(default_factory=dict)
+    model_params: ModelParams | None = None
+    endpoint_config: EndpointConfig | None = None
     # Discriminates the inline perf-scored entry (PERFORMANCE) from real accuracy
     # datasets (ACCURACY). Branch on this, not on dataset_name == "performance":
     # a dataset legitimately named "performance" must not be misclassified.
@@ -394,6 +398,8 @@ def _load_datasets(
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
                 acc_cfg.accuracy_config.extras or {},
+                model_params=ds_model_params,
+                endpoint_config=config.endpoint_config,
                 dataset_type=DatasetType.ACCURACY,
             )
         )
@@ -463,6 +469,8 @@ def _load_datasets(
                     accuracy_config.ground_truth,
                     accuracy_config.num_repeats,
                     accuracy_config.extras or {},
+                    model_params=perf_model_params,
+                    endpoint_config=config.endpoint_config,
                     dataset_type=DatasetType.PERFORMANCE,
                 )
             )
@@ -518,7 +526,7 @@ def setup_benchmark(
     # Report directory
     report_dir = resolve_report_dir(config)
     report_dir.mkdir(parents=True, exist_ok=True)
-    config.to_yaml_file(report_dir / "config.yaml")
+    config.to_yaml_file(report_dir / "config.yaml", redact_secrets=True)
 
     # Tokenizer check (light API call, no download)
     model_name = config.model_params.name
@@ -1492,13 +1500,22 @@ def _score_accuracy(
 
     for eval_cfg in ctx.eval_configs:
         try:
+            scorer_kwargs = dict(eval_cfg.extras)
+            if (
+                getattr(eval_cfg.scorer, "SCORER_ID", None)
+                == ScorerMethod.SWE_BENCH.value
+            ):
+                scorer_kwargs.update(
+                    model_params=eval_cfg.model_params,
+                    endpoint_config=eval_cfg.endpoint_config,
+                )
             scorer_instance = eval_cfg.scorer(
                 eval_cfg.dataset_name,
                 eval_cfg.dataset,
                 eval_cfg.report_dir,
                 extractor=eval_cfg.extractor,
                 ground_truth_column=eval_cfg.ground_truth_column,
-                **eval_cfg.extras,
+                **scorer_kwargs,
             )
         except TypeError as e:
             raise InputValidationError(
