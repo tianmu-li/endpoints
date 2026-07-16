@@ -80,7 +80,11 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
+from inference_endpoint.evaluation.scoring import (
+    AgenticInferenceInlineScorer,
+    Scorer,
+    SWEBenchScorer,
+)
 from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import (
@@ -142,6 +146,21 @@ class _ScorerShouldNotRun(Scorer, scorer_id="_test_scorer_should_not_run"):
 
     def score_single_sample(self, value, ground_truth):
         return 0.0
+
+
+class _ExternalScorerShouldNotRun(
+    _ScorerShouldNotRun, scorer_id="_test_external_scorer_should_not_run"
+):
+    SKIP_ENDPOINT_PHASE = True
+
+
+class _InlinePerformanceScorer(Scorer, scorer_id="_test_inline_performance"):
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        (self.report_dir / "scores.json").write_text('{"score": 1.0}')
+        return 1.0, 1
 
 
 # Reusable minimal config kwargs
@@ -671,7 +690,7 @@ class TestAccuracyOnlyDataset:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "datasets, patch_target",
+        "datasets, expected_scorer",
         [
             (
                 [
@@ -684,7 +703,7 @@ class TestAccuracyOnlyDataset:
                         "accuracy_config": {"eval_method": "swe_bench_scorer"},
                     },
                 ],
-                "swe_bench",
+                None,
             ),
             (
                 [
@@ -693,11 +712,22 @@ class TestAccuracyOnlyDataset:
                         "accuracy_config": {"eval_method": "swe_bench_scorer"},
                     },
                 ],
-                "resolver",
+                None,
+            ),
+            (
+                [
+                    {
+                        "type": "performance",
+                        "accuracy_config": {"eval_method": "agentic_inference_inline"},
+                    },
+                ],
+                AgenticInferenceInlineScorer,
             ),
         ],
     )
-    def test_perf_mode_skips_accuracy_setup(self, tmp_path, datasets, patch_target):
+    def test_perf_mode_loads_only_inline_performance_scorer(
+        self, tmp_path, datasets, expected_scorer
+    ):
         dummy_jsonl = tmp_path / "dummy.jsonl"
         dummy_jsonl.write_text('{"text_input": "hello"}\n')
         resolved_datasets = []
@@ -719,27 +749,23 @@ class TestAccuracyOnlyDataset:
             datasets=resolved_datasets,
         )
 
-        if patch_target == "swe_bench":
-            with (
-                patch.object(SWEBenchScorer, "preflight") as mock_preflight,
-                patch.object(SWEBench, "generate") as mock_generate,
-            ):
-                _, accuracy_datasets, eval_configs = _load_datasets(
-                    config, tmp_path, TestMode.PERF
-                )
-            mock_preflight.assert_not_called()
-            mock_generate.assert_not_called()
-        else:
-            with patch.object(
-                execute_mod, "_resolve_accuracy_components"
-            ) as mock_resolve:
-                _, accuracy_datasets, eval_configs = _load_datasets(
-                    config, tmp_path, TestMode.PERF
-                )
-            mock_resolve.assert_not_called()
+        with (
+            patch.object(SWEBenchScorer, "preflight") as mock_preflight,
+            patch.object(SWEBench, "generate") as mock_generate,
+        ):
+            _, accuracy_datasets, eval_configs = _load_datasets(
+                config, tmp_path, TestMode.PERF
+            )
+        mock_preflight.assert_not_called()
+        mock_generate.assert_not_called()
 
         assert accuracy_datasets == []
-        assert eval_configs == []
+        if expected_scorer is None:
+            assert eval_configs == []
+        else:
+            assert len(eval_configs) == 1
+            assert eval_configs[0].scorer is expected_scorer
+            assert eval_configs[0].dataset_type == DatasetType.PERFORMANCE
 
     @pytest.mark.unit
     @pytest.mark.parametrize("test_mode", [TestMode.ACC, TestMode.BOTH])
@@ -776,7 +802,7 @@ class TestAccuracyOnlyDataset:
                 config, tmp_path, test_mode
             )
 
-        mock_preflight.assert_called_once_with({}, loaded_sample_count=1)
+        mock_preflight.assert_called_once_with({})
         assert len(accuracy_datasets) == 1
         assert len(eval_configs) == 1
         assert eval_configs[0].scorer is SWEBenchScorer
@@ -1825,7 +1851,7 @@ class TestFinalizeBenchmark:
         )
 
     @pytest.mark.unit
-    def test_perf_mode_skips_accuracy_scoring_and_omits_scores(self, tmp_path):
+    def test_perf_mode_runs_only_inline_performance_scorer(self, tmp_path):
         config = OfflineConfig(**_OFFLINE_KWARGS)
         dataset = _make_loaded_dataset()
         ctx = _make_benchmark_context(
@@ -1835,6 +1861,16 @@ class TestFinalizeBenchmark:
             dataloader=dataset,
             eval_configs=[
                 AccuracyConfiguration(
+                    scorer=_InlinePerformanceScorer,
+                    extractor=None,
+                    dataset_name="performance",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                    dataset_type=DatasetType.PERFORMANCE,
+                ),
+                AccuracyConfiguration(
                     scorer=_ScorerShouldNotRun,
                     extractor=None,
                     dataset_name="accuracy",
@@ -1842,12 +1878,24 @@ class TestFinalizeBenchmark:
                     report_dir=tmp_path,
                     ground_truth_column=None,
                     num_repeats=1,
-                )
+                    dataset_type=DatasetType.ACCURACY,
+                ),
+                AccuracyConfiguration(
+                    scorer=_ExternalScorerShouldNotRun,
+                    extractor=None,
+                    dataset_name="external_performance",
+                    dataset=dataset,
+                    report_dir=tmp_path,
+                    ground_truth_column=None,
+                    num_repeats=1,
+                    dataset_type=DatasetType.PERFORMANCE,
+                ),
             ],
         )
 
         finalize_benchmark(ctx, _make_benchmark_result(tmp_path))
 
+        assert json.loads((tmp_path / "scores.json").read_text()) == {"score": 1.0}
         assert not (tmp_path / "accuracy" / "accuracy_results.json").exists()
 
     @pytest.mark.unit

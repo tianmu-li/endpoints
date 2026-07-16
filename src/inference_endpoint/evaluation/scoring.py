@@ -131,9 +131,7 @@ class Scorer(ABC):
         return None
 
     @classmethod
-    def preflight(
-        cls, extras: dict[str, Any], *, loaded_sample_count: int | None = None
-    ) -> None:
+    def preflight(cls, extras: dict[str, Any]) -> None:
         return None
 
     def __init__(
@@ -2230,9 +2228,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         return parsed if parsed > 0 else None
 
     @classmethod
-    def preflight(
-        cls, extras: dict[str, Any], *, loaded_sample_count: int | None = None
-    ) -> None:
+    def preflight(cls, extras: dict[str, Any]) -> None:
         """Check the SWE-bench service before the benchmark starts."""
         try:
             options = cls._resolve_options(extras)
