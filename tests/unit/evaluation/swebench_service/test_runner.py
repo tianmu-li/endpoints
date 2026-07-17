@@ -239,12 +239,10 @@ def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
     assert envs[0]["OPENAI_API_KEY"] == "agent-secret"
 
 
-def test_patch_config_selects_qwen_model_without_mutating_pythonpath(
-    monkeypatch, tmp_path
-):
+def test_qwen_template_selects_model_without_mutating_pythonpath(monkeypatch, tmp_path):
     envs: list[dict[str, str]] = []
     request = _request(["http://endpoint:30000"])
-    request.enable_swebench_toolcall_patch = True
+    request.template = "qwen_tools"
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     def fake_run_subprocess(cmd, log_path, *, env, **kwargs):

@@ -58,11 +58,10 @@ non-loopback deployments, bind it on a private network or start it with
 `--auth-token TOKEN` and set
 `accuracy_config.extras.swebench_service_auth_token: TOKEN`.
 
-Qwen SWE-bench configs may opt into `enable_swebench_toolcall_patch: true` and
-`swebench_template: qwen_tools`. That path builds a temporary minisweagent
-package overlay with replacement files packaged with the service, prepends it to
-`PYTHONPATH` for the agent run, and leaves the installed package untouched.
-Leave this flag unset for Kimi and other non-Qwen runs.
+Qwen SWE-bench configs opt in with `swebench_template: qwen_tools`. The service
+loads its packaged Qwen template and activates `QwenToolsModel` through
+mini-swe-agent's `model_class` hook. Omit this setting for Kimi and other
+non-Qwen runs.
 
 ## Common failure modes
 

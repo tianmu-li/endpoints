@@ -33,7 +33,6 @@ datasets:
         num_instances: 200
         workers: 10
         max_eval_workers: 10
-        enable_swebench_toolcall_patch: true
         swebench_template: "qwen_tools"
 
 settings:

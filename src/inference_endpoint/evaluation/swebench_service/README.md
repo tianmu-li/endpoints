@@ -26,7 +26,6 @@ accuracy_config:
 ```
 
 The service selects templates from its packaged allowlist. Use
-`swebench_template: qwen_tools` with
-`enable_swebench_toolcall_patch: true` for Qwen tool-call runs; otherwise omit
-the template option. Completed run metadata and artifacts are retained up to
-`--max-stored-runs` runs.
+`swebench_template: qwen_tools` to select both the Qwen template and packaged
+`QwenToolsModel`; otherwise omit the template option. Completed run metadata and
+artifacts are retained up to `--max-stored-runs` runs.

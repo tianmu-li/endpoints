@@ -224,9 +224,9 @@ If unset, it defaults to the load pattern's `target_concurrency` (for
 `concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers`
 (default 10, `--max_workers`) sets the eval harness's parallelism.
 
-Qwen tool-call runs should set `enable_swebench_toolcall_patch: true` and
-`swebench_template: qwen_tools`. Template contents are owned by the service; the
-client does not send host file paths for templates or patch code.
+Qwen tool-call runs should set `swebench_template: qwen_tools`. The selected
+packaged template also activates the service's `QwenToolsModel` through
+mini-swe-agent's `model_class` hook.
 
 Start the service on the host that has Docker:
 

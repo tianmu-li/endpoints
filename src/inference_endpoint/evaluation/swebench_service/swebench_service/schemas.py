@@ -44,7 +44,6 @@ class RunRequest(BaseModel):
     workers: int = Field(ge=1)
     max_eval_workers: int = Field(ge=1)
     evaluated_instance_ids: list[str] = Field(min_length=1)
-    enable_swebench_toolcall_patch: bool = False
     template: TemplateName = "default"
 
 

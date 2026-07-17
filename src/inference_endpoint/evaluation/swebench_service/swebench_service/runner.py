@@ -317,7 +317,7 @@ class SweBenchRunner:
         model_kwargs = model_cfg["model_kwargs"]
 
         model_cfg["model_name"] = request.model_name
-        if request.enable_swebench_toolcall_patch:
+        if request.template == "qwen_tools":
             model_cfg["model_class"] = (
                 "swebench_service.qwen_tools_model.QwenToolsModel"
             )

@@ -62,7 +62,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         "swe_bench_results.json",
         "status.json",
     }
-    TOOLCALL_PATCH_EXTRA: ClassVar[str] = "enable_swebench_toolcall_patch"
+    REMOVED_TOOLCALL_PATCH_EXTRA: ClassVar[str] = "enable_swebench_toolcall_patch"
     SERVICE_TEMPLATES: ClassVar[set[str]] = {"default", "qwen_tools"}
 
     def __init__(
@@ -79,7 +79,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         num_instances: int = 100,
         workers: int = 10,
         max_eval_workers: int = 10,
-        enable_swebench_toolcall_patch: bool = False,
         swebench_template: str | None = None,
         service_timeout_s: int | None = None,
         poll_interval_s: float | None = None,
@@ -104,7 +103,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "num_instances": num_instances,
                 "workers": workers,
                 "max_eval_workers": max_eval_workers,
-                self.TOOLCALL_PATCH_EXTRA: enable_swebench_toolcall_patch,
                 "swebench_template": swebench_template,
                 "service_timeout_s": service_timeout_s,
                 "poll_interval_s": poll_interval_s,
@@ -117,7 +115,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         self.num_instances = options["num_instances"]
         self.workers = options["workers"]
         self.max_eval_workers = options["max_eval_workers"]
-        self.enable_swebench_toolcall_patch = options[self.TOOLCALL_PATCH_EXTRA]
         self.swebench_template = options["swebench_template"]
         self.service_timeout_s = options["service_timeout_s"]
         self.poll_interval_s = options["poll_interval_s"]
@@ -131,7 +128,27 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "accuracy_config.extras.swebench_service_url is required for "
                 "swe_bench_scorer. Start the SWE-bench service and pass its URL."
             )
-        return str(value).strip().rstrip("/") + "/"
+        raw = str(value).strip()
+        message = (
+            "accuracy_config.extras.swebench_service_url must be an HTTP(S) "
+            "service root URL with no path, query, or fragment"
+        )
+        try:
+            parsed = urlparse(raw)
+            _ = parsed.port
+        except ValueError as exc:
+            raise SetupError(message) from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.hostname is None
+            or parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise SetupError(message)
+        return parsed._replace(path="/", params="", query="", fragment="").geturl()
 
     @classmethod
     def _http_json(
@@ -406,27 +423,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             raise ValueError(f"max_eval_workers must be >= 1; got {parsed}")
         return parsed
 
-    @classmethod
-    def _get_extra_bool(
-        cls, extras: dict[str, Any], key: str, *, default: bool = False
-    ) -> bool:
-        value = extras.get(key)
-        if value is None:
-            value = default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, int) and value in (0, 1):
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
-        raise SetupError(
-            f"accuracy_config.extras.{key} must be a boolean; got {value!r}"
-        )
-
     @staticmethod
     def _result_counter(result: dict[str, Any], key: str) -> int:
         """Parse a required nonnegative service-result counter."""
@@ -475,11 +471,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     def _resolve_service_template(cls, extras: dict[str, Any]) -> str:
         raw = extras.get("swebench_template")
         if raw is None:
-            raw = (
-                "qwen_tools"
-                if cls._get_extra_bool(extras, cls.TOOLCALL_PATCH_EXTRA)
-                else "default"
-            )
+            raw = "default"
         template = str(raw)
         if template not in cls.SERVICE_TEMPLATES:
             raise SetupError(
@@ -490,6 +482,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     @classmethod
     def _resolve_options(cls, extras: dict[str, Any]) -> dict[str, Any]:
+        if cls.REMOVED_TOOLCALL_PATCH_EXTRA in extras:
+            raise SetupError(
+                "accuracy_config.extras.enable_swebench_toolcall_patch has been "
+                "removed; use swebench_template: qwen_tools instead"
+            )
         options: dict[str, Any] = cls._resolve_dataset_options(extras)
         options["swebench_service_url"] = cls._normalize_service_url(
             extras.get("swebench_service_url")
@@ -515,10 +512,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "max_eval_workers",
             default=cls.DEFAULT_MAX_EVAL_WORKERS,
             min_value=1,
-        )
-        options[cls.TOOLCALL_PATCH_EXTRA] = cls._get_extra_bool(
-            extras,
-            cls.TOOLCALL_PATCH_EXTRA,
         )
         options["swebench_template"] = cls._resolve_service_template(extras)
         options["service_timeout_s"] = cls._get_extra_int(
@@ -639,7 +632,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "workers": self.workers,
             "max_eval_workers": self.max_eval_workers,
             "evaluated_instance_ids": evaluated_instance_ids,
-            self.TOOLCALL_PATCH_EXTRA: self.enable_swebench_toolcall_patch,
             "template": self.swebench_template,
         }
 

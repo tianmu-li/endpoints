@@ -186,6 +186,10 @@ class TestSWEBenchScorerPreflight:
         with pytest.raises(SetupError, match="swebench_service_url is required"):
             SWEBenchScorer.preflight({})
 
+    def test_non_root_service_url_raises(self):
+        with pytest.raises(SetupError, match="service root URL"):
+            SWEBenchScorer._normalize_service_url("http://service-host:18080/v1")
+
     def test_capability_mismatch_raises(self, monkeypatch):
         monkeypatch.setattr(
             SWEBenchScorer,
