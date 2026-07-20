@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import sys
 import threading
 import time
 from pathlib import Path
@@ -10,19 +9,17 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-
-_SERVICE_ROOT = (
-    Path(__file__).resolve().parents[4]
-    / "src"
-    / "inference_endpoint"
-    / "evaluation"
-    / "swebench_service"
+from inference_endpoint.evaluation.swebench_service.swebench_service.config import (
+    ServiceConfig,
 )
-sys.path.insert(0, str(_SERVICE_ROOT))
-
-from swebench_service.config import ServiceConfig  # noqa: E402
-from swebench_service.schemas import RunRequest, RunStatus  # noqa: E402
-from swebench_service.server import RunManager, create_app  # noqa: E402
+from inference_endpoint.evaluation.swebench_service.swebench_service.schemas import (
+    RunRequest,
+    RunStatus,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service.server import (
+    RunManager,
+    create_app,
+)
 
 pytestmark = pytest.mark.unit
 

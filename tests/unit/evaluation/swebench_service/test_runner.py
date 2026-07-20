@@ -4,29 +4,22 @@
 import subprocess
 import sys
 import threading
-from pathlib import Path
 
 import msgspec.json
 import pytest
 import yaml
-
-_SERVICE_ROOT = (
-    Path(__file__).resolve().parents[4]
-    / "src"
-    / "inference_endpoint"
-    / "evaluation"
-    / "swebench_service"
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    runner as runner_mod,
 )
-sys.path.insert(0, str(_SERVICE_ROOT))
-
-from swebench_service import runner as runner_mod  # noqa: E402
-from swebench_service.runner import (  # noqa: E402
+from inference_endpoint.evaluation.swebench_service.swebench_service.runner import (
     CancellationToken,
     RunCancelled,
     RunnerError,
     SweBenchRunner,
 )
-from swebench_service.schemas import RunRequest  # noqa: E402
+from inference_endpoint.evaluation.swebench_service.swebench_service.schemas import (
+    RunRequest,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -289,6 +282,7 @@ def test_validate_prediction_ids_rejects_unexpected_instances(tmp_path):
 
 
 def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     request = _request(["http://endpoint:30000"])
     output_dir = tmp_path / "output"
@@ -298,8 +292,9 @@ def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
     preds_path = output_dir / "preds.json"
     preds_path.write_text('{"repo__repo-1":"patch"}')
 
-    def fake_run_subprocess(cmd, log_path, *, cwd, **kwargs):
+    def fake_run_subprocess(cmd, log_path, *, cwd, env, **kwargs):
         assert cmd[:3] == [sys.executable, "-m", "swebench.harness.run_evaluation"]
+        assert "OPENAI_API_KEY" not in env
         run_id = cmd[cmd.index("--run_id") + 1]
         assert (run_dir / "swe_bench_eval_run_id.txt").read_text() == run_id
         (cwd / f"test-model.{run_id}.json").write_text(

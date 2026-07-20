@@ -546,11 +546,14 @@ class SweBenchRunner:
             "--instance_ids",
             *request.evaluated_instance_ids,
         ]
+        env = dict(os.environ)
+        env.pop("OPENAI_API_KEY", None)
         _run_subprocess(
             cmd,
             run_dir / "swe_bench_eval.log",
             cwd=output_dir,
             timeout_s=self.subprocess_timeout_s,
+            env=env,
             cancel_token=cancel_token,
         )
         safe_model = request.model_name.replace("/", "__")
