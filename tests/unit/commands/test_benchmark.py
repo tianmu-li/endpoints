@@ -825,7 +825,7 @@ class TestAccuracyOnlyDataset:
         assert eval_configs[0].scorer is SWEBenchScorer
 
     @pytest.mark.unit
-    def test_swe_bench_loader_receives_subset_and_split(self, tmp_path):
+    def test_swe_bench_loader_validates_subset_and_split(self, tmp_path):
         dummy_jsonl = tmp_path / "dummy.jsonl"
         dummy_jsonl.write_text('{"text_input": "hello"}\n')
         captured: dict[str, str] = {}
@@ -870,6 +870,30 @@ class TestAccuracyOnlyDataset:
             _load_datasets(config, tmp_path, TestMode.ACC)
 
         assert captured == {"subset": "lite", "split": "dev"}
+
+        accuracy_config = config.datasets[1].accuracy_config
+        assert accuracy_config is not None
+        invalid_accuracy_config = accuracy_config.model_copy(
+            update={"extras": {"subset": "unknown"}}
+        )
+        invalid_config = config.model_copy(
+            update={
+                "datasets": [
+                    config.datasets[0],
+                    config.datasets[1].model_copy(
+                        update={"accuracy_config": invalid_accuracy_config}
+                    ),
+                ]
+            }
+        )
+        with pytest.raises(
+            InputValidationError,
+            match=(
+                r"Dataset 'swe_bench': invalid accuracy_config\.extras for "
+                r"scorer 'swe_bench_scorer': Unknown SWE-bench subset"
+            ),
+        ):
+            _load_datasets(invalid_config, tmp_path, TestMode.ACC)
 
     @pytest.mark.unit
     def test_external_scorer_rejects_num_repeats_greater_than_one(self):

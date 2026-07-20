@@ -45,9 +45,8 @@ uv run inference-endpoint benchmark from-config \
 ```
 
 Both configs include a performance dataset and the SWE-bench accuracy dataset.
-`--mode acc` skips the performance dataset and is required because
-`type: online` configs default to `TestMode.PERF`, which skips accuracy
-datasets.
+`--mode acc` skips the performance dataset. Without the override, the default
+`TestMode.PERF` still runs the configured SWE-bench scorer.
 
 Scorer preflight calls the service `/health` endpoint. It does not check Docker
 or pre-pull images on the benchmark client.
@@ -58,10 +57,10 @@ non-loopback deployments, bind it on a private network or start it with
 `--auth-token TOKEN` and set
 `accuracy_config.extras.swebench_service_auth_token: TOKEN`.
 
-Qwen SWE-bench configs opt in with `swebench_template: qwen_tools`. The service
-loads its packaged Qwen template and activates `QwenToolsModel` through
-mini-swe-agent's `model_class` hook. Omit this setting for Kimi and other
-non-Qwen runs.
+Qwen SWE-bench configs opt in with
+`accuracy_config.extras.swebench_template: qwen_tools`. The service loads its
+packaged Qwen template and activates `QwenToolsModel` through mini-swe-agent's
+`model_class` hook. Omit this setting for Kimi and other non-Qwen runs.
 
 ## Common failure modes
 

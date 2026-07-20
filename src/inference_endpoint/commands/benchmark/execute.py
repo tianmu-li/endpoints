@@ -361,11 +361,20 @@ def _load_datasets(
             scorer_cls, acc_cfg.name, acc_cfg.accuracy_config
         )
         extras = acc_cfg.accuracy_config.extras or {}
+        try:
+            loader_kwargs = scorer_cls.dataset_loader_kwargs(extras)
+        except InputValidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - scorer hook validates user input
+            raise InputValidationError(
+                f"Dataset '{acc_cfg.name}': invalid accuracy_config.extras for "
+                f"scorer '{scorer_cls.SCORER_ID}': {exc}"
+            ) from exc
 
         ds = DataLoaderFactory.create_loader(
             acc_cfg,
             num_repeats=acc_cfg.accuracy_config.num_repeats,
-            **scorer_cls.dataset_loader_kwargs(extras),
+            **loader_kwargs,
         )
         ds_model_params = acc_cfg.effective_generation_config(config.model_params)
         ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
@@ -1688,8 +1697,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Emit the accuracy results as a focused artifact under accuracy/. Perf
     # rollups (qps/tps/latency percentiles) live in performance/result_summary.json
     # and response/error text lives in events.jsonl, so neither is duplicated
-    # here. Written only when scoring produced entries — a perf-only run leaves
-    # no accuracy/ folder.
+    # here. Written only when configured scoring produced entries.
     if accuracy_scores:
         # Plain cross-component mean of the per-dataset scores (3 datasets for
         # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.

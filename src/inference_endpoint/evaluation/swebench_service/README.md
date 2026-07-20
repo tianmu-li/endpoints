@@ -29,6 +29,7 @@ accuracy_config:
 ```
 
 The service selects templates from its packaged allowlist. Use
-`swebench_template: qwen_tools` to select both the Qwen template and packaged
-`QwenToolsModel`; otherwise omit the template option. Completed run metadata and
-artifacts are retained up to `--max-stored-runs` runs.
+`accuracy_config.extras.swebench_template: qwen_tools` to select both the Qwen
+template and packaged `QwenToolsModel`; otherwise omit the template option.
+Completed run metadata and artifacts are retained up to `--max-stored-runs`
+runs.

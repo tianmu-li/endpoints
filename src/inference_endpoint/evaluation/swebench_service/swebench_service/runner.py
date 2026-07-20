@@ -87,16 +87,21 @@ _RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
 
 
 def _normalize_endpoint_base(endpoint: str) -> str:
-    base = endpoint.rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
-    parsed = urlparse(base)
-    if parsed.hostname == "localhost":
-        netloc = "127.0.0.1"
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        base = urlunparse(parsed._replace(netloc=netloc))
-    return base
+    parsed = urlparse(endpoint)
+    hostname = parsed.hostname or ""
+    if hostname == "localhost":
+        hostname = "127.0.0.1"
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    return urlunparse(
+        parsed._replace(netloc=netloc, path=path, params="", query="", fragment="")
+    )
 
 
 def _exact_instance_filter(instance_ids: list[str]) -> str:

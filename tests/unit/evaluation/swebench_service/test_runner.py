@@ -158,17 +158,31 @@ def test_base_env_keeps_proxies_for_non_loopback_endpoints(monkeypatch, tmp_path
     assert "swebench-host" in env["NO_PROXY"].split(",")
 
 
-def test_patch_config_rewrites_localhost_api_base_to_127_0_0_1(tmp_path):
+@pytest.mark.parametrize(
+    ("endpoint", "expected_api_base"),
+    [
+        ("http://localhost:30000", "http://127.0.0.1:30000/v1"),
+        (
+            "https://user:pass@endpoint.example:8443/proxy/v1?token=secret#fragment",
+            "https://endpoint.example:8443/proxy/v1",
+        ),
+    ],
+)
+def test_patch_config_normalizes_api_base(tmp_path, endpoint, expected_api_base):
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
     patched = runner._patch_config(
         tmp_path,
-        _request(["http://localhost:30000"]),
+        _request([endpoint]),
         run_id="run-123",
     )
 
-    cfg = yaml.safe_load(patched.read_text())
-    assert cfg["model"]["model_kwargs"]["api_base"] == "http://127.0.0.1:30000/v1"
+    text = patched.read_text()
+    cfg = yaml.safe_load(text)
+    assert cfg["model"]["model_kwargs"]["api_base"] == expected_api_base
+    assert "user:pass" not in text
+    assert "token=secret" not in text
+    assert "fragment" not in text
     assert "model_class" not in cfg["model"]
     assert "api_key" not in cfg["model"]["model_kwargs"]
     assert cfg["environment"]["run_args"] == [

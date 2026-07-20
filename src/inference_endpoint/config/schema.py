@@ -208,11 +208,11 @@ AuditConfig = OutputCachingTestConfig
 
 
 class TestMode(str, Enum):
-    """Test mode determining what to collect.
+    """Test mode controlling performance issuance and response collection.
 
-    - PERF: Performance metrics only (no response storage)
-    - ACC: Accuracy metrics (collect and evaluate responses)
-    - BOTH: Both performance and accuracy (selective collection by dataset type)
+    - PERF: Run performance and configured scoring without in-process collection
+    - ACC: Skip performance and collect responses for configured scoring
+    - BOTH: Run performance and configured scoring with response collection
     """
 
     PERF = "perf"
