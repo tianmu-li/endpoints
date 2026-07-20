@@ -1265,9 +1265,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 f"got '{lp.type}'"
             )
 
-        # For swe_bench_scorer, forward target_concurrency as workers when the
-        # user has not set it explicitly. mini-swe-agent's parallelism should
-        # match the endpoint's concurrency budget.
+        # Forward target_concurrency as SWE-bench workers when unset.
         concurrency = (
             lp.target_concurrency
             if lp.type

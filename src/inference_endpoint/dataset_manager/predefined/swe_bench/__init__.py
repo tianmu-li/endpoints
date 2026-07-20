@@ -32,24 +32,7 @@ class SWEBench(
     Dataset,
     dataset_id="swe_bench",
 ):
-    """SWE-bench: Software Engineering Benchmark for LLM agents.
-
-    Loads instance IDs and problem statements from the SWE-bench Verified or
-    Lite subset. Used as the accuracy dataset for the swe_bench_scorer, which
-    submits the selected instances and endpoint configuration to a remote
-    SWE-bench service. The service runs mini-swe-agent against the endpoint and
-    grades patches with the SWE-bench evaluation harness.
-
-    The ``instance_id`` column identifies which instances mini-swe-agent will
-    evaluate. The endpoint phase is skipped entirely for this scorer
-    (``SKIP_ENDPOINT_PHASE=True``); ``SWEBenchScorer`` submits a service run
-    instead of launching an agent subprocess locally.
-
-    Using this dataset as a performance dataset (type: performance) is not
-    meaningful — problem statements sent directly to the model without an
-    agent framework don't reflect real SWE-bench usage. Use a different
-    dataset (e.g. ``random``) for the performance phase.
-    """
+    """Accuracy-only SWE-bench dataset for service-backed agent evaluation."""
 
     ACCURACY_ONLY = True
     COLUMN_NAMES = ["instance_id", "prompt"]

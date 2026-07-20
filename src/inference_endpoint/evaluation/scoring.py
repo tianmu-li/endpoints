@@ -2143,6 +2143,5 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         return self._breakdown
 
 
-# Imported after Scorer and the built-in scorers are defined so the extracted
-# subclass can register itself without introducing an import cycle.
+# Late import registers the extracted scorer without introducing a cycle.
 from .swe_bench_scorer import SWEBenchScorer as SWEBenchScorer  # noqa: E402

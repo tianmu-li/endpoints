@@ -318,12 +318,7 @@ def _validate_accuracy_config_for_scorer(
     dataset_name: str,
     accuracy_config: Any,
 ) -> None:
-    """Reject repeats that cannot be represented by an external scorer.
-
-    A scorer that skips the endpoint phase owns one external evaluation run.
-    Repeating its local dataset would not repeat that external run and would
-    therefore make reported sample counts misleading.
-    """
+    """Reject repeats for scorers that own one external evaluation run."""
     if scorer_cls.SKIP_ENDPOINT_PHASE and accuracy_config.num_repeats != 1:
         raise InputValidationError(
             f"Dataset '{dataset_name}' uses scorer '{scorer_cls.SCORER_ID}'; "
@@ -1391,13 +1386,9 @@ def _phase_response_counts(
 def _accuracy_uuid_bound(
     report_dir: Path | None, eval_configs: list[AccuracyConfiguration]
 ) -> set[str] | None:
-    """Union of the accuracy datasets' issued uuids from ``sample_idx_map.json``.
+    """Return issued accuracy UUIDs, or ``None`` when the map is unavailable.
 
-    Bounds the finalize-side raw-output read to the accuracy population so it
-    never holds the whole run's (incl. perf) response-text corpus. An empty set
-    is a valid bound for an external scorer that skips the endpoint phase.
-    Returns ``None`` when the map is unavailable so callers can fall back to an
-    unbounded read.
+    An empty set is a valid bound for scorers that skip endpoint issuance.
     """
     if report_dir is None:
         return None
@@ -1408,9 +1399,7 @@ def _accuracy_uuid_bound(
             "Accuracy OSL uuid bound unavailable (%s); reading outputs unbounded", e
         )
         return None
-    # A syntactically-valid map of the wrong shape must not crash finalize: this
-    # runs outside the per-dataset try, so a raised AttributeError/TypeError would
-    # fail scoring (OSL must never do that). Skip anything not dict-shaped.
+    # Invalid maps fall back to an unbounded read instead of failing scoring.
     if not isinstance(idx_map, dict):
         logger.warning(
             "Accuracy OSL uuid bound: sample_idx_map.json is not an object; "

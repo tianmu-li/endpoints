@@ -106,13 +106,7 @@ def _exact_instance_filter(instance_ids: list[str]) -> str:
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
-    """Terminate the launched command and its local subprocess descendants.
-
-    On POSIX, ``_run_subprocess`` creates a new session so the process ID is
-    also the process-group ID. Signaling that group is necessary because
-    ``mini-extra`` launches child processes that otherwise survive cancellation.
-    Detached Docker containers are handled separately by run-label cleanup.
-    """
+    """Terminate the local process group; containers are cleaned separately."""
     if process.poll() is not None:
         return
     try:

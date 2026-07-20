@@ -5,6 +5,9 @@ benchmark client only needs this service URL, but the service is trusted
 infrastructure: it receives one endpoint URL and optional endpoint credentials, runs
 Docker-backed evaluations, and serves run artifacts.
 
+The isolated service subproject commits its own `uv.lock` so deployments use a
+reproducible dependency set.
+
 ```bash
 uv run --project src/inference_endpoint/evaluation/swebench_service \
   python -m swebench_service --host 0.0.0.0 --port 18080
