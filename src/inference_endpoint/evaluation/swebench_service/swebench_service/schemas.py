@@ -57,6 +57,7 @@ class RunStatus(BaseModel):
     status: RunState
     created_at: float
     updated_at: float
+    finished_at: float | None = None
     phase: RunProgressPhase | None = None
     agent_total: int | None = None
     agent_completed: int | None = None

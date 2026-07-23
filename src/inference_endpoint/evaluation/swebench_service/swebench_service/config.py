@@ -27,4 +27,5 @@ class ServiceConfig:
     max_concurrent_runs: int = 1
     subprocess_timeout_s: int = 24 * 60 * 60
     auth_token: str | None = None
+    allow_unauthenticated: bool = False
     max_stored_runs: int = 100

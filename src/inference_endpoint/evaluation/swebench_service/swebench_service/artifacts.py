@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,7 @@ def _is_secret_key(key: Any) -> bool:
 def redact_text(text: str, secret_values: set[str] | None = None) -> str:
     redacted = text
     for secret in secret_values or set():
-        if len(secret) >= 4:
+        if secret:
             redacted = redacted.replace(secret, "<redacted>")
     for pattern in SECRET_TEXT_PATTERNS:
         if pattern.pattern.startswith("(://"):
@@ -75,6 +76,21 @@ def redact_text(text: str, secret_values: set[str] | None = None) -> str:
         else:
             redacted = pattern.sub(r"\1<redacted>", redacted)
     return redacted
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically publish an artifact without exposing a partial file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("wb") as file:
+        file.write(data)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(tmp, path)
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def redact_secrets(value: Any, *, secret_values: set[str] | None = None) -> Any:

@@ -214,9 +214,9 @@ convention for heavyweight evaluation work and supports exactly one endpoint URL
 in `endpoint_config.endpoints`; that URL must be reachable from the service
 host. Treat the service host as trusted infrastructure: it receives the endpoint
 URL and optional endpoint API key needed to run mini-swe-agent.
-For non-loopback service deployments, bind it on a private network or start it
-with `--auth-token` and set
-`accuracy_config.extras.swebench_service_auth_token`.
+Start the service with `--auth-token` and set
+`accuracy_config.extras.swebench_service_auth_token`. Only isolated local
+development should use the explicit `--allow-unauthenticated` override.
 
 `accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`).
 If unset, it defaults to the load pattern's `target_concurrency` (for
@@ -232,7 +232,8 @@ Start the service on the host that has Docker:
 
 ```bash
 uv run --project src/inference_endpoint/evaluation/swebench_service \
-  python -m swebench_service --host 0.0.0.0 --port 18080
+  python -m swebench_service --host 0.0.0.0 --port 18080 \
+  --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
 ```
 
 Then select the matching model config and run it from the repo root:

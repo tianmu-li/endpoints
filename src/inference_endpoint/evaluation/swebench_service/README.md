@@ -10,7 +10,8 @@ reproducible dependency set.
 
 ```bash
 uv run --project src/inference_endpoint/evaluation/swebench_service \
-  python -m swebench_service --host 0.0.0.0 --port 18080
+  python -m swebench_service --host 0.0.0.0 --port 18080 \
+  --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
 ```
 
 The endpoint URL in the benchmark config must be reachable from the service
@@ -20,8 +21,7 @@ Docker is required only on the service host.
 The benchmark client submits a run to this service only in `ACC` or `BOTH`
 mode; the default `PERF` mode skips external evaluation.
 
-For non-loopback deployments, bind only on a private network or set
-`--auth-token TOKEN` and configure the client with:
+The service requires `--auth-token TOKEN` by default. Configure the client with:
 
 ```yaml
 accuracy_config:
@@ -29,6 +29,10 @@ accuracy_config:
     swebench_service_url: http://swebench-host:18080
     swebench_service_auth_token: TOKEN
 ```
+
+For isolated local development only, pass `--allow-unauthenticated` explicitly.
+`/health` is intentionally public for liveness probes; every run and artifact route
+requires the bearer token.
 
 The service selects templates from its packaged allowlist. Use
 `accuracy_config.extras.swebench_template: qwen_tools` to select both the Qwen

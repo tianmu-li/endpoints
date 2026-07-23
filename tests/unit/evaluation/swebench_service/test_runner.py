@@ -236,7 +236,9 @@ def test_run_agent_filters_exact_instance_ids(monkeypatch, tmp_path):
     request.evaluated_instance_ids = ["repo__repo-1", "repo.with.regex+chars"]
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
 
-    runner._run_agent(request, tmp_path / "config.yaml", tmp_path, tmp_path)
+    runner._run_agent(
+        request, tmp_path / "config.yaml", tmp_path, tmp_path, {"agent-secret"}
+    )
 
     cmd = commands[0]
     assert "--slice" not in cmd
@@ -260,7 +262,7 @@ def test_qwen_template_selects_model_without_mutating_pythonpath(monkeypatch, tm
 
     patched = runner._patch_config(tmp_path, request, run_id="run-qwen")
     cfg = yaml.safe_load(patched.read_text())
-    runner._run_agent(request, patched, tmp_path, tmp_path)
+    runner._run_agent(request, patched, tmp_path, tmp_path, set())
 
     assert cfg["model"]["model_class"] == (
         "swebench_service.qwen_tools_model.QwenToolsModel"
@@ -279,6 +281,37 @@ def test_validate_prediction_ids_rejects_unexpected_instances(tmp_path):
 
     with pytest.raises(RunnerError, match="unexpected SWE-bench"):
         runner._validate_prediction_ids(request, preds)
+
+
+def test_validate_prediction_ids_logs_missing_instances(tmp_path, caplog):
+    request = _request(["http://endpoint:30000"])
+    request.evaluated_instance_ids = ["repo__repo-1", "repo__repo-2"]
+    preds = tmp_path / "preds.json"
+    preds.write_bytes(msgspec.json.encode({"repo__repo-1": "patch"}))
+    runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
+
+    runner._validate_prediction_ids(request, preds)
+
+    assert "omitted predictions" in caplog.text
+    assert "repo__repo-2" in caplog.text
+
+
+def test_logged_subprocess_publishes_redacted_log(tmp_path):
+    public_log = tmp_path / "agent.log"
+
+    SweBenchRunner._run_logged_subprocess(
+        [sys.executable, "-c", "print('Authorization: Bearer abc')"],
+        public_log,
+        cwd=tmp_path,
+        timeout_s=5,
+        env={},
+        secret_values={"abc"},
+        cancel_token=None,
+    )
+
+    assert "abc" not in public_log.read_text()
+    assert "<redacted>" in public_log.read_text()
+    assert not (tmp_path / ".agent.log.raw").exists()
 
 
 def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
@@ -303,17 +336,21 @@ def test_run_eval_persists_harness_run_id(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner_mod, "_run_subprocess", fake_run_subprocess)
 
-    result_path = runner._run_eval(request, preds_path, output_dir, run_dir)
+    result_path = runner._run_eval(request, preds_path, output_dir, run_dir, set())
 
     assert result_path.exists()
     assert (run_dir / "swe_bench_eval_run_id.txt").read_text().startswith("endpoints_")
 
 
 def _stub_successful_run(monkeypatch, runner: SweBenchRunner) -> None:
-    def fake_run_agent(request, patched_config, output_dir, run_dir, cancel_token=None):
+    def fake_run_agent(
+        request, patched_config, output_dir, run_dir, secret_values, cancel_token=None
+    ):
         (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
 
-    def fake_run_eval(request, preds_path, output_dir, run_dir, cancel_token=None):
+    def fake_run_eval(
+        request, preds_path, output_dir, run_dir, secret_values, cancel_token=None
+    ):
         result_path = output_dir / "result.json"
         result_path.write_text('{"resolved_instances":1,"submitted_instances":1}')
         return result_path
@@ -364,10 +401,14 @@ def test_run_cleans_harness_containers_after_eval_cancellation(monkeypatch, tmp_
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     cleaned: list[tuple[str, dict]] = []
 
-    def fake_run_agent(request, patched_config, output_dir, run_dir, cancel_token=None):
+    def fake_run_agent(
+        request, patched_config, output_dir, run_dir, secret_values, cancel_token=None
+    ):
         (output_dir / "preds.json").write_text('{"repo__repo-1":"patch"}')
 
-    def cancel_eval(request, preds_path, output_dir, run_dir, cancel_token=None):
+    def cancel_eval(
+        request, preds_path, output_dir, run_dir, secret_values, cancel_token=None
+    ):
         (run_dir / "swe_bench_eval_run_id.txt").write_text("endpoints_cancelled")
         raise RunCancelled("subprocess cancelled")
 
@@ -393,7 +434,7 @@ def test_run_cleans_harness_containers_after_eval_cancellation(monkeypatch, tmp_
     ]
 
 
-def test_cleanup_failure_fails_successful_run(monkeypatch, tmp_path):
+def test_cleanup_failure_does_not_fail_successful_run(monkeypatch, tmp_path):
     runner = SweBenchRunner(project_root=tmp_path, subprocess_timeout_s=30)
     _stub_successful_run(monkeypatch, runner)
     monkeypatch.setattr(
@@ -402,8 +443,9 @@ def test_cleanup_failure_fails_successful_run(monkeypatch, tmp_path):
         lambda run_id: (_ for _ in ()).throw(RunnerError("cleanup failed")),
     )
 
-    with pytest.raises(RunnerError, match="cleanup failed"):
-        runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-3")
+    result = runner.run(_request(["http://endpoint:30000"]), tmp_path / "run-3")
+
+    assert result == {"resolved_instances": 1, "submitted_instances": 1}
 
 
 def test_cleanup_failure_does_not_mask_primary_failure(monkeypatch, tmp_path):

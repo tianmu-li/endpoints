@@ -147,7 +147,11 @@ def _payload_with_instances(n: int) -> dict:
 
 async def _client(tmp_path: Path, runner) -> TestClient:
     app = create_app(
-        ServiceConfig(artifact_root=tmp_path, max_concurrent_runs=1),
+        ServiceConfig(
+            artifact_root=tmp_path,
+            max_concurrent_runs=1,
+            allow_unauthenticated=True,
+        ),
         runner=runner,
     )
     client = TestClient(TestServer(app))
@@ -209,18 +213,25 @@ async def test_post_run_rejects_multiple_endpoint_urls(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_optional_auth_token_is_enforced(tmp_path):
+async def test_auth_token_protects_run_routes_but_not_health(tmp_path):
     client = await _auth_client(tmp_path, FakeRunner())
     try:
-        unauthorized = await client.get("/health")
-        authorized = await client.get(
-            "/health", headers={"Authorization": "Bearer tok"}
+        health = await client.get("/health")
+        unauthorized = await client.post("/v1/runs", json=_payload())
+        authorized = await client.post(
+            "/v1/runs", json=_payload(), headers={"Authorization": "Bearer tok"}
         )
     finally:
         await client.close()
 
     assert unauthorized.status == 401
-    assert authorized.status == 200
+    assert health.status == 200
+    assert authorized.status == 202
+
+
+def test_service_requires_auth_or_explicit_development_override(tmp_path):
+    with pytest.raises(ValueError, match="requires --auth-token"):
+        create_app(ServiceConfig(artifact_root=tmp_path), runner=FakeRunner())
 
 
 @pytest.mark.asyncio
@@ -419,6 +430,61 @@ async def test_artifact_endpoint_blocks_path_traversal(tmp_path):
 
     assert ok.status == 200
     assert blocked.status == 404
+
+
+@pytest.mark.asyncio
+async def test_log_artifact_redacts_short_secret(tmp_path):
+    class LogRunner(FakeRunner):
+        def run(self, request, run_dir: Path):
+            (run_dir / "swe_bench_agent.log").write_text(
+                f"Authorization: Bearer {request.endpoint_api_key}"
+            )
+            return super().run(request, run_dir)
+
+    client = await _client(tmp_path, LogRunner())
+    payload = _payload()
+    payload["endpoint_api_key"] = "abc"
+    try:
+        submit = await client.post("/v1/runs", json=payload)
+        submitted = await submit.json()
+        run_id = submitted["run_id"]
+        for _ in range(20):
+            status_resp = await client.get(f"/v1/runs/{run_id}")
+            status = await status_resp.json()
+            if status["status"] == "succeeded":
+                break
+            await asyncio.sleep(0.01)
+        response = await client.get(f"/v1/runs/{run_id}/artifacts/swe_bench_agent.log")
+        text = await response.text()
+    finally:
+        await client.close()
+
+    assert response.status == 200
+    assert "abc" not in text
+    assert "<redacted>" in text
+
+
+@pytest.mark.asyncio
+async def test_finalization_failure_marks_run_failed_and_releases_capacity(
+    monkeypatch, tmp_path
+):
+    manager = RunManager(
+        config=ServiceConfig(artifact_root=tmp_path, max_concurrent_runs=1),
+        runner=FakeRunner(),
+    )
+
+    async def fail_terminal_progress(*args, **kwargs):
+        raise OSError("status volume full")
+
+    monkeypatch.setattr(manager, "_terminal_progress_async", fail_terminal_progress)
+    first = await manager.submit(RunRequest.model_validate(_payload()))
+    await manager._tasks[first.run_id]
+
+    assert manager.runs[first.run_id].status == "failed"
+    assert manager.active_count() == 0
+    second = await manager.submit(RunRequest.model_validate(_payload()))
+    await manager.cancel_all_active()
+    assert second.status == "queued"
 
 
 @pytest.mark.asyncio

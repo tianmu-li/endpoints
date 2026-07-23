@@ -19,7 +19,8 @@ From the repo root:
 
 ```bash
 uv run --project src/inference_endpoint/evaluation/swebench_service \
-  python -m swebench_service --host 0.0.0.0 --port 18080
+  python -m swebench_service --host 0.0.0.0 --port 18080 \
+  --auth-token "$SWEBENCH_SERVICE_AUTH_TOKEN"
 ```
 
 Sanity check:
@@ -55,10 +56,10 @@ Scorer preflight calls the service `/health` endpoint. It does not check Docker
 or pre-pull images on the benchmark client.
 
 The service is trusted infrastructure. It receives one endpoint URL and optional
-endpoint credentials, runs Docker-backed evaluations, and serves artifacts. For
-non-loopback deployments, bind it on a private network or start it with
-`--auth-token TOKEN` and set
-`accuracy_config.extras.swebench_service_auth_token: TOKEN`.
+endpoint credentials, runs Docker-backed evaluations, and serves artifacts. It
+requires `--auth-token TOKEN`; set
+`accuracy_config.extras.swebench_service_auth_token: TOKEN`. Use
+`--allow-unauthenticated` only for isolated local development.
 
 Qwen SWE-bench configs opt in with
 `accuracy_config.extras.swebench_template: qwen_tools`. The service loads its

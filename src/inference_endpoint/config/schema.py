@@ -1146,6 +1146,17 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
+        uses_swe_bench = any(
+            dataset.accuracy_config is not None
+            and dataset.accuracy_config.eval_method == ScorerMethod.SWE_BENCH
+            for dataset in self.datasets
+        )
+        if uses_swe_bench and len(self.endpoint_config.endpoints) != 1:
+            raise ValueError(
+                "SWE-bench service mode supports exactly one endpoint URL; "
+                f"got {len(self.endpoint_config.endpoints)}."
+            )
+
         # TODO(vir): Move API-type-specific validation out of this generic
         # cross-model validator and into the selected adapter. Requires a larger refactor.
         #

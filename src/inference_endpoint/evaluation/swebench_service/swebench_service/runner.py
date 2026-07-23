@@ -33,7 +33,7 @@ from urllib.parse import urlparse, urlunparse
 import msgspec.json
 import yaml
 
-from .artifacts import redact_secrets
+from .artifacts import atomic_write_bytes, redact_secrets, redact_text
 from .schemas import RunRequest, TemplateName
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ TEMPLATE_FILES: dict[TemplateName, str] = {
 _LOG_TAIL_MAX_BYTES = 64 * 1024
 _LOG_TAIL_MAX_LINES = 50
 _RUN_LABEL = "com.mlcommons.endpoints.swebench-run"
+_PROCESS_TERMINATE_TIMEOUT_S = 10
 
 
 def _normalize_endpoint_base(endpoint: str) -> str:
@@ -119,7 +120,7 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
             process.terminate()
         else:
             os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=10)
+        process.wait(timeout=_PROCESS_TERMINATE_TIMEOUT_S)
     except ProcessLookupError:
         return
     except subprocess.TimeoutExpired:
@@ -127,7 +128,10 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
             process.kill()
         else:
             os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=10)
+        try:
+            process.wait(timeout=_PROCESS_TERMINATE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            logger.warning("SWE-bench subprocess did not exit after SIGKILL")
 
 
 def _run_subprocess(
@@ -223,12 +227,8 @@ class SweBenchRunner:
         run_dir: Path,
         cancel_token: CancellationToken | None = None,
     ) -> dict[str, Any]:
-        primary_error: BaseException | None = None
         try:
             return self._run(request, run_dir, cancel_token)
-        except BaseException as exc:
-            primary_error = exc
-            raise
         finally:
             try:
                 cleanup_kwargs: dict[str, Any] = {}
@@ -242,8 +242,6 @@ class SweBenchRunner:
                         }
                 self._cleanup_containers(run_dir.name, **cleanup_kwargs)
             except Exception:
-                if primary_error is None:
-                    raise
                 logger.warning(
                     "Could not clean up SWE-bench Docker containers for run %s",
                     run_dir.name,
@@ -277,7 +275,14 @@ class SweBenchRunner:
                 request,
                 run_id=run_dir.name,
             )
-            self._run_agent(request, patched_config, output_dir, run_dir, cancel_token)
+            self._run_agent(
+                request,
+                patched_config,
+                output_dir,
+                run_dir,
+                secret_values,
+                cancel_token,
+            )
 
         preds_path = output_dir / "preds.json"
         if not preds_path.exists():
@@ -286,7 +291,7 @@ class SweBenchRunner:
         shutil.copy2(preds_path, run_dir / "preds.json")
 
         result_path = self._run_eval(
-            request, preds_path, output_dir, run_dir, cancel_token
+            request, preds_path, output_dir, run_dir, secret_values, cancel_token
         )
         shutil.copy2(result_path, run_dir / "swe_bench_results.json")
         return msgspec.json.decode(result_path.read_bytes(), type=dict)
@@ -381,6 +386,7 @@ class SweBenchRunner:
         patched_config: Path,
         output_dir: Path,
         run_dir: Path,
+        secret_values: set[str],
         cancel_token: CancellationToken | None = None,
     ) -> None:
         instance_filter = _exact_instance_filter(request.evaluated_instance_ids)
@@ -402,14 +408,48 @@ class SweBenchRunner:
             "--output",
             str(output_dir),
         ]
-        _run_subprocess(
+        self._run_logged_subprocess(
             cmd,
             run_dir / "swe_bench_agent.log",
             cwd=output_dir,
             timeout_s=self.subprocess_timeout_s,
             env=self._base_env(request),
+            secret_values=secret_values,
             cancel_token=cancel_token,
         )
+
+    @staticmethod
+    def _run_logged_subprocess(
+        cmd: list[str],
+        public_log_path: Path,
+        *,
+        cwd: Path,
+        timeout_s: int,
+        env: dict[str, str],
+        secret_values: set[str],
+        cancel_token: CancellationToken | None,
+    ) -> None:
+        raw_log_path = public_log_path.with_name(f".{public_log_path.name}.raw")
+        try:
+            _run_subprocess(
+                cmd,
+                raw_log_path,
+                cwd=cwd,
+                timeout_s=timeout_s,
+                env=env,
+                cancel_token=cancel_token,
+            )
+        finally:
+            try:
+                if raw_log_path.exists():
+                    atomic_write_bytes(
+                        public_log_path,
+                        redact_text(
+                            raw_log_path.read_text(errors="replace"), secret_values
+                        ).encode(),
+                    )
+            finally:
+                raw_log_path.unlink(missing_ok=True)
 
     def _base_env(self, request: RunRequest) -> dict[str, str]:
         env = dict(os.environ)
@@ -512,6 +552,14 @@ class SweBenchRunner:
                 "mini-extra produced predictions for unexpected SWE-bench "
                 f"instances: {', '.join(unexpected[:10])}"
             )
+        missing = sorted(expected - actual)
+        if missing:
+            logger.warning(
+                "mini-extra omitted predictions for %d expected SWE-bench "
+                "instances: %s",
+                len(missing),
+                ", ".join(missing[:10]),
+            )
 
     def _run_eval(
         self,
@@ -519,6 +567,7 @@ class SweBenchRunner:
         preds_path: Path,
         output_dir: Path,
         run_dir: Path,
+        secret_values: set[str],
         cancel_token: CancellationToken | None = None,
     ) -> Path:
         run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
@@ -548,12 +597,13 @@ class SweBenchRunner:
         ]
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)
-        _run_subprocess(
+        self._run_logged_subprocess(
             cmd,
             run_dir / "swe_bench_eval.log",
             cwd=output_dir,
             timeout_s=self.subprocess_timeout_s,
             env=env,
+            secret_values=secret_values,
             cancel_token=cancel_token,
         )
         safe_model = request.model_name.replace("/", "__")

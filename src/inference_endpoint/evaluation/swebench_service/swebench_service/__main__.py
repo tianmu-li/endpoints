@@ -31,7 +31,9 @@ def main() -> None:
     parser.add_argument("--artifact-root", default="swebench_service_artifacts")
     parser.add_argument("--max-concurrent-runs", type=int, default=1)
     parser.add_argument("--subprocess-timeout-s", type=int, default=24 * 60 * 60)
-    parser.add_argument("--auth-token")
+    auth_group = parser.add_mutually_exclusive_group()
+    auth_group.add_argument("--auth-token")
+    auth_group.add_argument("--allow-unauthenticated", action="store_true")
     parser.add_argument("--max-stored-runs", type=int, default=100)
     args = parser.parse_args()
 
@@ -42,6 +44,7 @@ def main() -> None:
         max_concurrent_runs=args.max_concurrent_runs,
         subprocess_timeout_s=args.subprocess_timeout_s,
         auth_token=args.auth_token,
+        allow_unauthenticated=args.allow_unauthenticated,
         max_stored_runs=args.max_stored_runs,
     )
     web.run_app(create_app(config), host=config.host, port=config.port)

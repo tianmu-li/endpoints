@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
+import logging
 import shutil
 import time
 import uuid
@@ -29,10 +31,21 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from . import API_VERSION, CAPABILITIES
-from .artifacts import redact_secrets, redact_text, resolve_artifact
+from .artifacts import (
+    atomic_write_bytes,
+    redact_secrets,
+    redact_text,
+    resolve_artifact,
+)
 from .config import ServiceConfig
 from .runner import CancellationToken, RunCancelled, RunnerProtocol, SweBenchRunner
 from .schemas import ArtifactInfo, RunRequest, RunStatus
+
+_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+_PROGRESS_REFRESH_INTERVAL_S = 1.0
+_ARTIFACT_RETENTION_GRACE_S = 5 * 60
+_LOG_ARTIFACT_NAMES = frozenset({"swe_bench_agent.log", "swe_bench_eval.log"})
+logger = logging.getLogger(__name__)
 
 
 class RunManager:
@@ -44,6 +57,9 @@ class RunManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancel_tokens: dict[str, CancellationToken] = {}
         self._secret_values: dict[str, set[str]] = {}
+        self._progress_refresh_locks: dict[str, asyncio.Lock] = {}
+        self._last_progress_refresh: dict[str, float] = {}
+        self._prune_task: asyncio.Task[None] | None = None
         self._semaphore = asyncio.Semaphore(config.max_concurrent_runs)
         self._submit_lock = asyncio.Lock()
 
@@ -75,16 +91,23 @@ class RunManager:
             self._cancel_tokens[run_id] = CancellationToken()
             self._secret_values[run_id] = self._secrets_for_request(request)
         run_dir = self.run_dir(run_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "request.json").write_bytes(
-            msgspec.json.encode(
-                redact_secrets(
-                    request.model_dump(mode="json"),
-                    secret_values=self._secret_values[run_id],
-                )
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_bytes(
+                run_dir / "request.json",
+                msgspec.json.encode(
+                    redact_secrets(
+                        request.model_dump(mode="json"),
+                        secret_values=self._secret_values[run_id],
+                    )
+                ),
             )
-        )
-        self._write_status(status)
+            self._write_status(status)
+        except OSError as exc:
+            self._discard_run(run_id)
+            raise web.HTTPInternalServerError(
+                text="could not persist SWE-bench run metadata"
+            ) from exc
         self._tasks[run_id] = asyncio.create_task(
             self._execute(run_id, request, run_dir)
         )
@@ -121,29 +144,44 @@ class RunManager:
                 if token.is_cancelled():
                     self._update(run_id, status="cancelled", phase="cancelled")
                     return
-                self._refresh_progress(run_id)
-                final_progress = self._terminal_progress(run_id, "succeeded")
-                artifacts = [
-                    ArtifactInfo(name=name, url=f"/v1/runs/{run_id}/artifacts/{name}")
-                    for name in (
-                        "preds.json",
-                        "swe_bench_agent.log",
-                        "swe_bench_eval.log",
-                        "swe_bench_results.json",
-                        "status.json",
+                try:
+                    await self._refresh_progress(run_id, force=True)
+                    final_progress = await self._terminal_progress_async(
+                        run_id, "succeeded"
                     )
-                    if (run_dir / name).exists()
-                ]
-                self._update(
-                    run_id,
-                    status="succeeded",
-                    result=result,
-                    artifacts=artifacts,
-                    **final_progress,
-                )
+                    artifacts = [
+                        ArtifactInfo(
+                            name=name, url=f"/v1/runs/{run_id}/artifacts/{name}"
+                        )
+                        for name in (
+                            "preds.json",
+                            "swe_bench_agent.log",
+                            "swe_bench_eval.log",
+                            "swe_bench_results.json",
+                            "status.json",
+                        )
+                        if (run_dir / name).exists()
+                    ]
+                    self._update(
+                        run_id,
+                        status="succeeded",
+                        result=result,
+                        artifacts=artifacts,
+                        **final_progress,
+                    )
+                except Exception as exc:
+                    self._update(
+                        run_id,
+                        status="failed",
+                        phase="failed",
+                        error=redact_text(
+                            f"could not finalize SWE-bench run: {exc}",
+                            self._secret_values.get(run_id, set()),
+                        ),
+                    )
         finally:
             self._tasks.pop(run_id, None)
-            self._prune_completed_runs()
+            self._schedule_prune()
 
     def _run_runner(
         self, request: RunRequest, run_dir: Path, token: CancellationToken
@@ -156,16 +194,18 @@ class RunManager:
             return self.runner.run(request, run_dir)
         return self.runner.run(request, run_dir, cancel_token=token)
 
-    def cancel(self, run_id: str) -> RunStatus:
-        status = self.get(run_id)
+    async def cancel(self, run_id: str) -> RunStatus:
+        status = await self.get(run_id)
         if status.status not in {"queued", "running"}:
             return status
         token = self._cancel_tokens.get(run_id)
         if token is not None:
-            token.cancel()
-        self._update(
-            run_id, status="cancelled", **self._terminal_progress(run_id, "cancelled")
-        )
+            await asyncio.to_thread(token.cancel)
+        try:
+            progress = await self._terminal_progress_async(run_id, "cancelled")
+        except OSError:
+            progress = {"phase": "cancelled", "message": "cancelled"}
+        self._update(run_id, status="cancelled", **progress)
         return self.runs[run_id]
 
     async def cancel_all_active(self) -> None:
@@ -174,8 +214,8 @@ class RunManager:
             for run in self.runs.values()
             if run.status in {"queued", "running"}
         ]
-        for run_id in active:
-            self.cancel(run_id)
+        if active:
+            await asyncio.gather(*(self.cancel(run_id) for run_id in active))
         tasks = [self._tasks[run_id] for run_id in active if run_id in self._tasks]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -193,50 +233,114 @@ class RunManager:
         data = current.model_dump()
         data.update(updates)
         data["updated_at"] = time.time()
+        if data["status"] in _TERMINAL_STATES and current.finished_at is None:
+            data["finished_at"] = data["updated_at"]
         updated = RunStatus.model_validate(data)
         self.runs[run_id] = updated
-        self._write_status(updated)
+        try:
+            self._write_status(updated)
+        except OSError:
+            # The in-memory transition releases capacity even if the disk status
+            # record cannot be updated (for example, a full artifact volume).
+            logger.exception("Could not persist status for SWE-bench run %s", run_id)
 
     def _write_status(self, status: RunStatus) -> None:
         run_dir = self.run_dir(status.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         secret_values = self._secret_values.get(status.run_id, set())
-        (run_dir / "status.json").write_bytes(
+        atomic_write_bytes(
+            run_dir / "status.json",
             msgspec.json.encode(
                 redact_secrets(
                     status.model_dump(mode="json"), secret_values=secret_values
                 )
-            )
+            ),
         )
 
-    def get(self, run_id: str) -> RunStatus:
+    def _discard_run(self, run_id: str) -> None:
+        self.runs.pop(run_id, None)
+        self._requests.pop(run_id, None)
+        self._cancel_tokens.pop(run_id, None)
+        self._secret_values.pop(run_id, None)
+        self._progress_refresh_locks.pop(run_id, None)
+        self._last_progress_refresh.pop(run_id, None)
+
+    async def get(self, run_id: str) -> RunStatus:
         try:
-            self._refresh_progress(run_id)
+            await self._refresh_progress(run_id)
             return self.runs[run_id]
         except KeyError as exc:
             raise web.HTTPNotFound(text="unknown run_id") from exc
 
-    def _refresh_progress(self, run_id: str) -> None:
-        status = self.runs[run_id]
-        if status.status in {"failed", "cancelled"}:
-            progress = self._terminal_progress(run_id, status.status)
-        elif status.status == "succeeded":
-            progress = self._terminal_progress(run_id, "succeeded")
-        else:
-            progress = self._derived_progress(run_id)
+    async def _refresh_progress(self, run_id: str, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_progress_refresh.get(run_id, 0)
+            < _PROGRESS_REFRESH_INTERVAL_S
+        ):
+            return
+        lock = self._progress_refresh_locks.setdefault(run_id, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            if (
+                not force
+                and now - self._last_progress_refresh.get(run_id, 0)
+                < _PROGRESS_REFRESH_INTERVAL_S
+            ):
+                return
+            status = self.runs[run_id]
+            request = self._requests.get(run_id)
+            try:
+                progress = await asyncio.to_thread(
+                    self._read_progress, run_id, status, request
+                )
+            except OSError:
+                logger.warning(
+                    "Could not refresh progress for SWE-bench run %s",
+                    run_id,
+                    exc_info=True,
+                )
+                return
+            self._last_progress_refresh[run_id] = now
+            current_status = self.runs.get(run_id)
+            if current_status is None or current_status.status != status.status:
+                return
+            self._apply_progress(run_id, progress)
 
+    def _apply_progress(self, run_id: str, progress: dict[str, Any]) -> None:
+        status = self.runs[run_id]
         current = status.model_dump()
         changed = any(current.get(key) != value for key, value in progress.items())
         if not changed:
             return
-        current.update(progress)
-        current["updated_at"] = time.time()
-        updated = RunStatus.model_validate(current)
-        self.runs[run_id] = updated
-        self._write_status(updated)
+        self._update(run_id, **progress)
 
-    def _derived_progress(self, run_id: str) -> dict[str, Any]:
+    def _read_progress(
+        self,
+        run_id: str,
+        status: RunStatus,
+        request: RunRequest | None,
+    ) -> dict[str, Any]:
+        if status.status in {"failed", "cancelled"}:
+            return self._terminal_progress(run_id, status.status, status, request)
+        elif status.status == "succeeded":
+            return self._terminal_progress(run_id, "succeeded", status, request)
+        return self._derived_progress(run_id, status, request)
+
+    async def _terminal_progress_async(self, run_id: str, phase: str) -> dict[str, Any]:
+        status = self.runs[run_id]
         request = self._requests.get(run_id)
+        return await asyncio.to_thread(
+            self._terminal_progress, run_id, phase, status, request
+        )
+
+    def _derived_progress(
+        self,
+        run_id: str,
+        status: RunStatus,
+        request: RunRequest | None,
+    ) -> dict[str, Any]:
         run_dir = self.run_dir(run_id)
         output_dir = run_dir / "swe_bench_output"
         agent_total = len(request.evaluated_instance_ids) if request else 0
@@ -254,7 +358,7 @@ class RunManager:
             )
             message = "eval"
         else:
-            phase = "queued" if self.runs[run_id].status == "queued" else "agent"
+            phase = "queued" if status.status == "queued" else "agent"
             eval_total = 0
             message = phase
 
@@ -267,8 +371,14 @@ class RunManager:
             "message": message,
         }
 
-    def _terminal_progress(self, run_id: str, phase: str) -> dict[str, Any]:
-        progress = self._derived_progress(run_id)
+    def _terminal_progress(
+        self,
+        run_id: str,
+        phase: str,
+        status: RunStatus,
+        request: RunRequest | None,
+    ) -> dict[str, Any]:
+        progress = self._derived_progress(run_id, status, request)
         if phase == "succeeded":
             agent_total = progress["agent_total"] or 0
             eval_total = progress["eval_total"] or self._count_predictions(
@@ -334,22 +444,45 @@ class RunManager:
     def run_dir(self, run_id: str) -> Path:
         return self.config.artifact_root / run_id
 
-    def _prune_completed_runs(self) -> None:
+    def _schedule_prune(self) -> None:
+        if self._prune_task is None or self._prune_task.done():
+            self._prune_task = asyncio.create_task(self._prune_completed_runs())
+
+    async def _prune_completed_runs(self) -> None:
         limit = self.config.max_stored_runs
         if limit <= 0:
             return
-        completed = [
-            run for run in self.runs.values() if run.status not in {"queued", "running"}
-        ]
-        overflow = len(completed) - limit
-        if overflow <= 0:
-            return
-        for run in sorted(completed, key=lambda item: item.updated_at)[:overflow]:
-            self.runs.pop(run.run_id, None)
-            self._requests.pop(run.run_id, None)
-            self._cancel_tokens.pop(run.run_id, None)
-            self._secret_values.pop(run.run_id, None)
-            shutil.rmtree(self.run_dir(run.run_id), ignore_errors=True)
+        while True:
+            completed = [
+                run
+                for run in self.runs.values()
+                if run.status in _TERMINAL_STATES and run.finished_at is not None
+            ]
+            overflow = len(completed) - limit
+            if overflow <= 0:
+                return
+            now = time.time()
+            eligible: list[RunStatus] = []
+            for run in completed:
+                finished_at = run.finished_at
+                if (
+                    finished_at is not None
+                    and now - finished_at >= _ARTIFACT_RETENTION_GRACE_S
+                ):
+                    eligible.append(run)
+            eligible.sort(key=lambda run: run.finished_at or 0)
+            if not eligible:
+                next_expiry = min(
+                    (run.finished_at or now) + _ARTIFACT_RETENTION_GRACE_S
+                    for run in completed
+                )
+                await asyncio.sleep(max(0, next_expiry - now))
+                continue
+            for run in eligible[:overflow]:
+                run_id = run.run_id
+                run_dir = self.run_dir(run_id)
+                self._discard_run(run_id)
+                await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
 
 
 MANAGER_KEY = web.AppKey("manager", RunManager)
@@ -359,6 +492,15 @@ def create_app(
     config: ServiceConfig,
     runner: RunnerProtocol | None = None,
 ) -> web.Application:
+    if config.auth_token and config.allow_unauthenticated:
+        raise ValueError(
+            "SWE-bench service cannot set both auth_token and " "allow_unauthenticated"
+        )
+    if not config.auth_token and not config.allow_unauthenticated:
+        raise ValueError(
+            "SWE-bench service requires --auth-token; use "
+            "--allow-unauthenticated only for trusted development"
+        )
     config = ServiceConfig(
         host=config.host,
         port=config.port,
@@ -366,6 +508,7 @@ def create_app(
         max_concurrent_runs=config.max_concurrent_runs,
         subprocess_timeout_s=config.subprocess_timeout_s,
         auth_token=config.auth_token,
+        allow_unauthenticated=config.allow_unauthenticated,
         max_stored_runs=config.max_stored_runs,
     )
     config.artifact_root.mkdir(parents=True, exist_ok=True)
@@ -377,8 +520,13 @@ def create_app(
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
-        if config.auth_token and request.headers.get("Authorization") != (
-            f"Bearer {config.auth_token}"
+        if (
+            request.path != "/health"
+            and config.auth_token
+            and not hmac.compare_digest(
+                request.headers.get("Authorization", ""),
+                f"Bearer {config.auth_token}",
+            )
         ):
             raise web.HTTPUnauthorized(text="unauthorized")
         return await handler(request)
@@ -412,7 +560,7 @@ def create_app(
         )
 
     async def get_run(request: web.Request) -> web.Response:
-        status = manager.get(request.match_info["run_id"])
+        status = await manager.get(request.match_info["run_id"])
         return web.json_response(
             redact_secrets(
                 status.model_dump(mode="json"),
@@ -421,7 +569,7 @@ def create_app(
         )
 
     async def cancel_run(request: web.Request) -> web.Response:
-        status = manager.cancel(request.match_info["run_id"])
+        status = await manager.cancel(request.match_info["run_id"])
         return web.json_response(
             redact_secrets(
                 status.model_dump(mode="json"),
@@ -429,14 +577,26 @@ def create_app(
             )
         )
 
-    async def get_artifact(request: web.Request) -> web.FileResponse:
+    async def get_artifact(request: web.Request) -> web.StreamResponse:
         run_id = request.match_info["run_id"]
         name = request.match_info["name"]
-        manager.get(run_id)
+        await manager.get(run_id)
         try:
             path = resolve_artifact(manager.run_dir(run_id), name)
         except FileNotFoundError as exc:
             raise web.HTTPNotFound(text="artifact not found") from exc
+        if name in _LOG_ARTIFACT_NAMES:
+            text = await asyncio.to_thread(
+                lambda: redact_text(
+                    path.read_text(errors="replace"),
+                    manager._secret_values.get(run_id, set()),
+                )
+            )
+            return web.Response(
+                text=text,
+                content_type="text/plain",
+                headers={"Content-Disposition": f'attachment; filename="{name}"'},
+            )
         return web.FileResponse(path)
 
     app.router.add_get("/health", health)
