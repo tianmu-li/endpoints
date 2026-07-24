@@ -30,6 +30,7 @@ RunProgressPhase = Literal[
     "cancelled",
 ]
 TemplateName = Literal["default", "qwen_tools"]
+SWEBenchSubset = Literal["verified", "lite"]
 
 
 class RunRequest(BaseModel):
@@ -39,7 +40,7 @@ class RunRequest(BaseModel):
     endpoint_urls: list[str] = Field(min_length=1, max_length=1)
     endpoint_api_key: str | None = None
     generation_params: dict[str, Any] = Field(default_factory=dict)
-    subset: str = "verified"
+    subset: SWEBenchSubset = "verified"
     split: str = "test"
     num_instances: int = Field(ge=1)
     workers: int = Field(ge=1)

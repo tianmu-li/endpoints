@@ -197,6 +197,7 @@ async def test_health_response_schema(tmp_path):
         {"model_name": ""},
         {"endpoint_urls": ["ftp://endpoint"]},
         {"endpoint_urls": ["http:///v1"]},
+        {"subset": "unsupported"},
         {"num_instances": 2},
     ],
 )

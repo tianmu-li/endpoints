@@ -39,7 +39,7 @@ class _RejectRedirectHandler(urllib_request.HTTPRedirectHandler):
         return None
 
 
-_ARTIFACT_OPENER = urllib_request.build_opener(_RejectRedirectHandler())
+_NO_REDIRECT_OPENER = urllib_request.build_opener(_RejectRedirectHandler())
 
 
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
@@ -182,7 +182,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             headers["Content-Type"] = "application/json"
         req = urllib_request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib_request.urlopen(req, timeout=timeout_s) as resp:
+            with _NO_REDIRECT_OPENER.open(req, timeout=timeout_s) as resp:
                 body = resp.read()
         except urllib_error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -270,7 +270,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         tmp = target.with_suffix(target.suffix + ".tmp")
         try:
             with (
-                _ARTIFACT_OPENER.open(req, timeout=60.0) as resp,
+                _NO_REDIRECT_OPENER.open(req, timeout=60.0) as resp,
                 tmp.open("wb") as output,
             ):
                 shutil.copyfileobj(resp, output, length=1024 * 1024)

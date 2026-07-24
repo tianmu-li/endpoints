@@ -231,23 +231,21 @@ class TestSWEBenchScorerPreflight:
         ],
     )
     def test_http_json_translates_transport_error(self, error, match, monkeypatch):
-        monkeypatch.setattr(
-            swe_bench_mod.urllib_request,
-            "urlopen",
-            MagicMock(side_effect=error),
-        )
+        opener = MagicMock()
+        opener.open.side_effect = error
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
 
         with pytest.raises(SetupError, match=match):
             SWEBenchScorer._http_json("http://service-host:18080/health")
 
+        opener.open.assert_called_once()
+
     def test_http_json_translates_invalid_json(self, monkeypatch):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = b"not-json"
-        monkeypatch.setattr(
-            swe_bench_mod.urllib_request,
-            "urlopen",
-            MagicMock(return_value=response),
-        )
+        opener = MagicMock()
+        opener.open.return_value = response
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
 
         with pytest.raises(SetupError, match="returned invalid JSON"):
             SWEBenchScorer._http_json("http://service-host:18080/health")
@@ -694,7 +692,7 @@ class TestSWEBenchScorerScore:
 
     def test_unsafe_artifact_url_is_not_downloaded(self, report_dir, monkeypatch):
         opener = MagicMock()
-        monkeypatch.setattr(swe_bench_mod, "_ARTIFACT_OPENER", opener)
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",
@@ -746,7 +744,7 @@ class TestSWEBenchScorerScore:
         ]
         opener = MagicMock()
         opener.open.return_value = response
-        monkeypatch.setattr(swe_bench_mod, "_ARTIFACT_OPENER", opener)
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",
@@ -777,7 +775,7 @@ class TestSWEBenchScorerScore:
         ]
         opener = MagicMock()
         opener.open.return_value = response
-        monkeypatch.setattr(swe_bench_mod, "_ARTIFACT_OPENER", opener)
+        monkeypatch.setattr(swe_bench_mod, "_NO_REDIRECT_OPENER", opener)
 
         SWEBenchScorer._download_artifact(
             "http://service-host:18080/",
