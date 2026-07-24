@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import inspect
 import logging
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +44,22 @@ from .schemas import ArtifactInfo, RunRequest, RunStatus
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 _PROGRESS_REFRESH_INTERVAL_S = 1.0
 _ARTIFACT_RETENTION_GRACE_S = 5 * 60
+_PRUNE_RETRY_INTERVAL_S = 1.0
 _LOG_ARTIFACT_NAMES = frozenset({"swe_bench_agent.log", "swe_bench_eval.log"})
 logger = logging.getLogger(__name__)
+
+
+class _LeasedFileResponse(web.FileResponse):
+    def __init__(self, path: Path, release: Callable[[], None]):
+        super().__init__(path)
+        self._release = release
+
+    async def prepare(self, request: web.Request) -> Any:
+        try:
+            return await super().prepare(request)
+        finally:
+            release, self._release = self._release, lambda: None
+            release()
 
 
 class RunManager:
@@ -58,7 +72,9 @@ class RunManager:
         self._cancel_tokens: dict[str, CancellationToken] = {}
         self._secret_values: dict[str, set[str]] = {}
         self._progress_refresh_locks: dict[str, asyncio.Lock] = {}
+        self._status_persist_locks: dict[str, asyncio.Lock] = {}
         self._last_progress_refresh: dict[str, float] = {}
+        self._artifact_readers: dict[str, int] = {}
         self._prune_task: asyncio.Task[None] | None = None
         self._semaphore = asyncio.Semaphore(config.max_concurrent_runs)
         self._submit_lock = asyncio.Lock()
@@ -92,17 +108,12 @@ class RunManager:
             self._secret_values[run_id] = self._secrets_for_request(request)
         run_dir = self.run_dir(run_id)
         try:
-            run_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(
-                run_dir / "request.json",
-                msgspec.json.encode(
-                    redact_secrets(
-                        request.model_dump(mode="json"),
-                        secret_values=self._secret_values[run_id],
-                    )
-                ),
+            await asyncio.to_thread(
+                self._persist_submission,
+                run_id,
+                request,
+                status,
             )
-            self._write_status(status)
         except OSError as exc:
             self._discard_run(run_id)
             raise web.HTTPInternalServerError(
@@ -113,26 +124,53 @@ class RunManager:
         )
         return status
 
+    def _persist_submission(
+        self, run_id: str, request: RunRequest, status: RunStatus
+    ) -> None:
+        run_dir = self.run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(
+            run_dir / "request.json",
+            msgspec.json.encode(
+                redact_secrets(
+                    request.model_dump(mode="json"),
+                    secret_values=self._secret_values[run_id],
+                )
+            ),
+        )
+        self._write_status(status)
+
     async def _execute(self, run_id: str, request: RunRequest, run_dir: Path) -> None:
         token = self._cancel_tokens[run_id]
         try:
             async with self._semaphore:
                 if token.is_cancelled():
-                    self._update(run_id, status="cancelled", phase="cancelled")
+                    await self._transition(
+                        run_id, status="cancelled", phase="cancelled"
+                    )
                     return
-                self._update(run_id, status="running", phase="agent", message="agent")
+                await self._transition(
+                    run_id, status="running", phase="agent", message="agent"
+                )
                 try:
                     result = await asyncio.to_thread(
-                        self._run_runner, request, run_dir, token
+                        self.runner.run,
+                        request,
+                        run_dir,
+                        cancel_token=token,
                     )
                 except RunCancelled:
-                    self._update(run_id, status="cancelled", phase="cancelled")
+                    await self._transition(
+                        run_id, status="cancelled", phase="cancelled"
+                    )
                     return
                 except Exception as exc:
                     if token.is_cancelled():
-                        self._update(run_id, status="cancelled", phase="cancelled")
+                        await self._transition(
+                            run_id, status="cancelled", phase="cancelled"
+                        )
                         return
-                    self._update(
+                    await self._transition(
                         run_id,
                         status="failed",
                         phase="failed",
@@ -142,7 +180,9 @@ class RunManager:
                     )
                     return
                 if token.is_cancelled():
-                    self._update(run_id, status="cancelled", phase="cancelled")
+                    await self._transition(
+                        run_id, status="cancelled", phase="cancelled"
+                    )
                     return
                 try:
                     await self._refresh_progress(run_id, force=True)
@@ -162,7 +202,7 @@ class RunManager:
                         )
                         if (run_dir / name).exists()
                     ]
-                    self._update(
+                    await self._transition(
                         run_id,
                         status="succeeded",
                         result=result,
@@ -170,7 +210,7 @@ class RunManager:
                         **final_progress,
                     )
                 except Exception as exc:
-                    self._update(
+                    await self._transition(
                         run_id,
                         status="failed",
                         phase="failed",
@@ -183,17 +223,6 @@ class RunManager:
             self._tasks.pop(run_id, None)
             self._schedule_prune()
 
-    def _run_runner(
-        self, request: RunRequest, run_dir: Path, token: CancellationToken
-    ) -> dict[str, Any]:
-        try:
-            signature = inspect.signature(self.runner.run)
-        except (TypeError, ValueError):
-            return self.runner.run(request, run_dir)
-        if "cancel_token" not in signature.parameters:
-            return self.runner.run(request, run_dir)
-        return self.runner.run(request, run_dir, cancel_token=token)
-
     async def cancel(self, run_id: str) -> RunStatus:
         status = await self.get(run_id)
         if status.status not in {"queued", "running"}:
@@ -205,7 +234,7 @@ class RunManager:
             progress = await self._terminal_progress_async(run_id, "cancelled")
         except OSError:
             progress = {"phase": "cancelled", "message": "cancelled"}
-        self._update(run_id, status="cancelled", **progress)
+        await self._transition(run_id, status="cancelled", **progress)
         return self.runs[run_id]
 
     async def cancel_all_active(self) -> None:
@@ -216,9 +245,18 @@ class RunManager:
         ]
         if active:
             await asyncio.gather(*(self.cancel(run_id) for run_id in active))
-        tasks = [self._tasks[run_id] for run_id in active if run_id in self._tasks]
+        tasks = list(self._tasks.values())
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        await self.cancel_all_active()
+        prune_task = self._prune_task
+        if prune_task is not None and not prune_task.done():
+            prune_task.cancel()
+        if prune_task is not None:
+            await asyncio.gather(prune_task, return_exceptions=True)
+        self._prune_task = None
 
     def _secrets_for_request(self, request: RunRequest) -> set[str]:
         secrets: set[str] = set()
@@ -228,7 +266,7 @@ class RunManager:
             secrets.add(self.config.auth_token)
         return secrets
 
-    def _update(self, run_id: str, **updates: Any) -> None:
+    def _update_in_memory(self, run_id: str, **updates: Any) -> RunStatus:
         current = self.runs[run_id]
         data = current.model_dump()
         data.update(updates)
@@ -237,12 +275,19 @@ class RunManager:
             data["finished_at"] = data["updated_at"]
         updated = RunStatus.model_validate(data)
         self.runs[run_id] = updated
+        return updated
+
+    async def _transition(self, run_id: str, **updates: Any) -> RunStatus:
+        updated = self._update_in_memory(run_id, **updates)
+        lock = self._status_persist_locks.setdefault(run_id, asyncio.Lock())
         try:
-            self._write_status(updated)
+            async with lock:
+                await asyncio.to_thread(self._write_status, updated)
         except OSError:
             # The in-memory transition releases capacity even if the disk status
             # record cannot be updated (for example, a full artifact volume).
             logger.exception("Could not persist status for SWE-bench run %s", run_id)
+        return updated
 
     def _write_status(self, status: RunStatus) -> None:
         run_dir = self.run_dir(status.run_id)
@@ -263,7 +308,9 @@ class RunManager:
         self._cancel_tokens.pop(run_id, None)
         self._secret_values.pop(run_id, None)
         self._progress_refresh_locks.pop(run_id, None)
+        self._status_persist_locks.pop(run_id, None)
         self._last_progress_refresh.pop(run_id, None)
+        self._artifact_readers.pop(run_id, None)
 
     async def get(self, run_id: str) -> RunStatus:
         try:
@@ -314,7 +361,7 @@ class RunManager:
         changed = any(current.get(key) != value for key, value in progress.items())
         if not changed:
             return
-        self._update(run_id, **progress)
+        self._update_in_memory(run_id, **progress)
 
     def _read_progress(
         self,
@@ -444,6 +491,18 @@ class RunManager:
     def run_dir(self, run_id: str) -> Path:
         return self.config.artifact_root / run_id
 
+    def acquire_artifact_reader(self, run_id: str) -> None:
+        if run_id not in self.runs:
+            raise web.HTTPNotFound(text="unknown run_id")
+        self._artifact_readers[run_id] = self._artifact_readers.get(run_id, 0) + 1
+
+    def release_artifact_reader(self, run_id: str) -> None:
+        readers = self._artifact_readers.get(run_id, 0)
+        if readers <= 1:
+            self._artifact_readers.pop(run_id, None)
+        else:
+            self._artifact_readers[run_id] = readers - 1
+
     def _schedule_prune(self) -> None:
         if self._prune_task is None or self._prune_task.done():
             self._prune_task = asyncio.create_task(self._prune_completed_runs())
@@ -463,20 +522,32 @@ class RunManager:
                 return
             now = time.time()
             eligible: list[RunStatus] = []
+            pinned_expired = False
+            next_expiry: float | None = None
             for run in completed:
                 finished_at = run.finished_at
-                if (
-                    finished_at is not None
-                    and now - finished_at >= _ARTIFACT_RETENTION_GRACE_S
-                ):
-                    eligible.append(run)
+                if finished_at is None:
+                    continue
+                expires_at = finished_at + _ARTIFACT_RETENTION_GRACE_S
+                if now < expires_at:
+                    next_expiry = (
+                        expires_at
+                        if next_expiry is None
+                        else min(next_expiry, expires_at)
+                    )
+                    continue
+                if self._artifact_readers.get(run.run_id, 0) > 0:
+                    pinned_expired = True
+                    continue
+                eligible.append(run)
             eligible.sort(key=lambda run: run.finished_at or 0)
             if not eligible:
-                next_expiry = min(
-                    (run.finished_at or now) + _ARTIFACT_RETENTION_GRACE_S
-                    for run in completed
-                )
-                await asyncio.sleep(max(0, next_expiry - now))
+                delays = []
+                if next_expiry is not None:
+                    delays.append(max(0, next_expiry - now))
+                if pinned_expired:
+                    delays.append(_PRUNE_RETRY_INTERVAL_S)
+                await asyncio.sleep(min(delays) if delays else _PRUNE_RETRY_INTERVAL_S)
                 continue
             for run in eligible[:overflow]:
                 run_id = run.run_id
@@ -534,10 +605,10 @@ def create_app(
     app = web.Application(middlewares=[auth_middleware])
     app[MANAGER_KEY] = manager
 
-    async def shutdown_active_runs(app: web.Application) -> None:
-        await app[MANAGER_KEY].cancel_all_active()
+    async def shutdown_manager(app: web.Application) -> None:
+        await app[MANAGER_KEY].shutdown()
 
-    app.on_shutdown.append(shutdown_active_runs)
+    app.on_shutdown.append(shutdown_manager)
 
     async def health(request: web.Request) -> web.Response:
         return web.json_response(
@@ -581,23 +652,30 @@ def create_app(
         run_id = request.match_info["run_id"]
         name = request.match_info["name"]
         await manager.get(run_id)
+        manager.acquire_artifact_reader(run_id)
         try:
             path = resolve_artifact(manager.run_dir(run_id), name)
         except FileNotFoundError as exc:
+            manager.release_artifact_reader(run_id)
             raise web.HTTPNotFound(text="artifact not found") from exc
         if name in _LOG_ARTIFACT_NAMES:
-            text = await asyncio.to_thread(
-                lambda: redact_text(
-                    path.read_text(errors="replace"),
-                    manager._secret_values.get(run_id, set()),
+            try:
+                text = await asyncio.to_thread(
+                    lambda: redact_text(
+                        path.read_text(errors="replace"),
+                        manager._secret_values.get(run_id, set()),
+                    )
                 )
-            )
+            finally:
+                manager.release_artifact_reader(run_id)
             return web.Response(
                 text=text,
                 content_type="text/plain",
                 headers={"Content-Disposition": f'attachment; filename="{name}"'},
             )
-        return web.FileResponse(path)
+        return _LeasedFileResponse(
+            path, lambda: manager.release_artifact_reader(run_id)
+        )
 
     app.router.add_get("/health", health)
     app.router.add_post("/v1/runs", post_run)

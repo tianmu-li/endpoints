@@ -210,7 +210,8 @@ AuditConfig = OutputCachingTestConfig
 class TestMode(str, Enum):
     """Test mode controlling performance issuance and response collection.
 
-    - PERF: Run performance and configured scoring without in-process collection
+    - PERF: Run performance and ordinary configured scoring without in-process
+      collection; skip scorers that own an external evaluation run
     - ACC: Skip performance and collect responses for configured scoring
     - BOTH: Run performance and configured scoring with response collection
     """

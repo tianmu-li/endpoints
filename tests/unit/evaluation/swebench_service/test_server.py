@@ -9,6 +9,13 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from inference_endpoint.evaluation.swe_bench_scorer import SWEBenchScorer
+from inference_endpoint.evaluation.swebench_service.swebench_service import (
+    server as server_mod,
+)
+from inference_endpoint.evaluation.swebench_service.swebench_service.artifacts import (
+    SAFE_ARTIFACT_NAMES,
+)
 from inference_endpoint.evaluation.swebench_service.swebench_service.config import (
     ServiceConfig,
 )
@@ -17,6 +24,7 @@ from inference_endpoint.evaluation.swebench_service.swebench_service.schemas imp
     RunStatus,
 )
 from inference_endpoint.evaluation.swebench_service.swebench_service.server import (
+    MANAGER_KEY,
     RunManager,
     create_app,
 )
@@ -29,12 +37,12 @@ class FakeRunner:
         self.delay = delay
         self.fail = fail
         self.requests: list[object] = []
+        self.cancel_tokens: list[object] = []
 
-    def run(self, request, run_dir: Path):
+    def run(self, request, run_dir: Path, cancel_token=None):
         self.requests.append(request)
+        self.cancel_tokens.append(cancel_token)
         if self.delay:
-            import time
-
             time.sleep(self.delay)
         if self.fail:
             raise RuntimeError("runner failed")
@@ -49,7 +57,7 @@ class AgentProgressRunner:
     def __init__(self):
         self.ready = threading.Event()
 
-    def run(self, request, run_dir: Path):
+    def run(self, request, run_dir: Path, cancel_token=None):
         output_dir = run_dir / "swe_bench_output"
         output_dir.mkdir()
         (output_dir / "exit_statuses_0002.yaml").write_text(
@@ -77,7 +85,7 @@ class EvalProgressRunner:
     def __init__(self):
         self.ready = threading.Event()
 
-    def run(self, request, run_dir: Path):
+    def run(self, request, run_dir: Path, cancel_token=None):
         output_dir = run_dir / "swe_bench_output"
         report_dir = (
             output_dir / "logs" / "run_evaluation" / "eval-run-1" / "test-model"
@@ -257,6 +265,7 @@ async def test_runner_transitions_to_succeeded(tmp_path):
     assert status["phase"] == "succeeded"
     assert status["agent_completed"] == 1
     assert status["eval_completed"] == 1
+    assert runner.cancel_tokens[0] is not None
 
 
 @pytest.mark.asyncio
@@ -321,6 +330,50 @@ async def test_status_reports_zero_progress_when_files_are_missing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_progress_polling_is_off_thread_and_memory_only(monkeypatch, tmp_path):
+    manager = RunManager(
+        config=ServiceConfig(artifact_root=tmp_path),
+        runner=FakeRunner(),
+    )
+    run_id = "run-progress"
+    now = time.time()
+    manager.runs[run_id] = RunStatus(
+        run_id=run_id,
+        status="running",
+        created_at=now,
+        updated_at=now,
+        phase="agent",
+        agent_total=1,
+        agent_completed=0,
+    )
+    manager._requests[run_id] = RunRequest.model_validate(_payload())
+
+    def slow_progress(*args):
+        time.sleep(0.1)
+        return {
+            "phase": "agent",
+            "agent_total": 1,
+            "agent_completed": 1,
+            "eval_total": 0,
+            "eval_completed": 0,
+            "message": "agent",
+        }
+
+    monkeypatch.setattr(manager, "_read_progress", slow_progress)
+    monkeypatch.setattr(
+        manager,
+        "_write_status",
+        lambda status: pytest.fail("progress polling must not persist status.json"),
+    )
+
+    poll_task = asyncio.create_task(manager.get(run_id))
+    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+    status = await poll_task
+
+    assert status.agent_completed == 1
+
+
+@pytest.mark.asyncio
 async def test_runner_transitions_to_failed(tmp_path):
     client = await _client(tmp_path, FakeRunner(fail=True))
     try:
@@ -360,16 +413,63 @@ async def test_cancel_run_marks_cancelled_and_signals_runner(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancellation_keeps_event_loop_responsive(monkeypatch, tmp_path):
+    runner = CancellationAwareRunner()
+    manager = RunManager(
+        config=ServiceConfig(artifact_root=tmp_path, max_concurrent_runs=1),
+        runner=runner,
+    )
+    submitted = await manager.submit(RunRequest.model_validate(_payload()))
+    assert await asyncio.to_thread(runner.started.wait, 2)
+    token = manager._cancel_tokens[submitted.run_id]
+    original_cancel = token.cancel
+    original_write_status = manager._write_status
+
+    def slow_cancel():
+        time.sleep(0.1)
+        original_cancel()
+
+    def slow_write_status(status):
+        time.sleep(0.1)
+        original_write_status(status)
+
+    monkeypatch.setattr(token, "cancel", slow_cancel)
+    monkeypatch.setattr(manager, "_write_status", slow_write_status)
+    cancel_task = asyncio.create_task(manager.cancel(submitted.run_id))
+
+    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+    assert not cancel_task.done()
+    cancelled = await cancel_task
+    await manager.shutdown()
+
+    assert cancelled.status == "cancelled"
+    assert runner.cleaned.is_set()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_active_runs(tmp_path):
     runner = CancellationAwareRunner()
-    client = await _client(tmp_path, runner)
+    app = create_app(
+        ServiceConfig(
+            artifact_root=tmp_path,
+            max_concurrent_runs=1,
+            allow_unauthenticated=True,
+        ),
+        runner=runner,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
     await client.post("/v1/runs", json=_payload())
     assert await asyncio.to_thread(runner.started.wait, 2)
+    prune_task = asyncio.create_task(asyncio.sleep(60))
+    app[MANAGER_KEY]._prune_task = prune_task
 
     await client.close()
 
     assert await asyncio.to_thread(runner.cancelled.wait, 2)
     assert await asyncio.to_thread(runner.cleaned.wait, 2)
+    assert prune_task.cancelled()
+    assert app[MANAGER_KEY]._prune_task is None
 
 
 @pytest.mark.asyncio
@@ -411,6 +511,48 @@ async def test_concurrent_submit_reserves_capacity_once(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pruning_waits_for_active_artifact_reader(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_mod, "_ARTIFACT_RETENTION_GRACE_S", 60)
+    monkeypatch.setattr(server_mod, "_PRUNE_RETRY_INTERVAL_S", 0.01)
+    manager = RunManager(
+        config=ServiceConfig(artifact_root=tmp_path, max_stored_runs=1),
+        runner=FakeRunner(),
+    )
+    now = time.time()
+    for run_id, finished_at in (
+        ("run-old", now - 120),
+        ("run-new", now),
+    ):
+        manager.runs[run_id] = RunStatus(
+            run_id=run_id,
+            status="succeeded",
+            created_at=finished_at - 1,
+            updated_at=finished_at,
+            finished_at=finished_at,
+        )
+        manager.run_dir(run_id).mkdir()
+        (manager.run_dir(run_id) / "preds.json").write_text("{}")
+
+    manager.acquire_artifact_reader("run-old")
+    prune_task = asyncio.create_task(manager._prune_completed_runs())
+    await asyncio.sleep(0.03)
+
+    assert "run-old" in manager.runs
+    assert manager.run_dir("run-old").exists()
+
+    manager.release_artifact_reader("run-old")
+    await asyncio.wait_for(prune_task, timeout=0.2)
+
+    assert "run-old" not in manager.runs
+    assert not manager.run_dir("run-old").exists()
+    assert "run-new" in manager.runs
+
+
+def test_client_and_service_artifact_allowlists_match():
+    assert SWEBenchScorer.SAFE_ARTIFACT_NAMES == SAFE_ARTIFACT_NAMES
+
+
+@pytest.mark.asyncio
 async def test_artifact_endpoint_blocks_path_traversal(tmp_path):
     client = await _client(tmp_path, FakeRunner())
     try:
@@ -424,22 +566,25 @@ async def test_artifact_endpoint_blocks_path_traversal(tmp_path):
                 break
             await asyncio.sleep(0.01)
         ok = await client.get(f"/v1/runs/{run_id}/artifacts/preds.json")
+        await ok.read()
         blocked = await client.get(f"/v1/runs/{run_id}/artifacts/..%2Fstatus.json")
+        active_readers = client.app[MANAGER_KEY]._artifact_readers
     finally:
         await client.close()
 
     assert ok.status == 200
     assert blocked.status == 404
+    assert active_readers == {}
 
 
 @pytest.mark.asyncio
 async def test_log_artifact_redacts_short_secret(tmp_path):
     class LogRunner(FakeRunner):
-        def run(self, request, run_dir: Path):
+        def run(self, request, run_dir: Path, cancel_token=None):
             (run_dir / "swe_bench_agent.log").write_text(
                 f"Authorization: Bearer {request.endpoint_api_key}"
             )
-            return super().run(request, run_dir)
+            return super().run(request, run_dir, cancel_token=cancel_token)
 
     client = await _client(tmp_path, LogRunner())
     payload = _payload()
@@ -512,7 +657,7 @@ async def test_status_redacts_api_keys(tmp_path):
 @pytest.mark.asyncio
 async def test_failed_status_redacts_secret_values(tmp_path):
     class SecretFailRunner:
-        def run(self, request, run_dir: Path):
+        def run(self, request, run_dir: Path, cancel_token=None):
             raise RuntimeError(f"failed with api_key={request.endpoint_api_key}")
 
     client = await _client(tmp_path, SecretFailRunner())

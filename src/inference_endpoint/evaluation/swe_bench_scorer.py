@@ -142,6 +142,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             parsed.scheme not in {"http", "https"}
             or not parsed.netloc
             or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
             or parsed.path not in {"", "/"}
             or parsed.params
             or parsed.query
@@ -409,18 +411,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             raise SetupError(
                 f"accuracy_config.extras.{key} must be >= {min_value}; got {parsed}"
             )
-        return parsed
-
-    @staticmethod
-    def _validate_max_eval_workers(value: Any) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"max_eval_workers must be an integer; got {value!r}"
-            ) from exc
-        if parsed < 1:
-            raise ValueError(f"max_eval_workers must be >= 1; got {parsed}")
         return parsed
 
     @staticmethod

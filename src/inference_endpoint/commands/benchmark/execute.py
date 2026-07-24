@@ -447,9 +447,6 @@ def _load_datasets(
                         "accuracy_config.num_repeats must be 1 because scoring runs "
                         "on already-issued performance outputs"
                     )
-                _validate_accuracy_config_for_scorer(
-                    scorer_cls, perf_cfg.name, accuracy_config
-                )
                 scorer_cls.preflight(accuracy_config.extras or {})
 
                 eval_configs.append(
